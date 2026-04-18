@@ -144,10 +144,18 @@ router.post('/screen', async (req, res) => {
           entry_id:      m.entryId,
           score:         m.score,
           match_type:    m.matchType,
-          matched_field: 'PRIMARY_NAME',
-          matched_value: m.name,
+          matched_field: m.matchedVia === 'ALIAS' ? 'ALIAS' : 'PRIMARY_NAME',
+          matched_value: m.matchedName || m.name,
+          matched_via:   m.matchedVia  || 'PRIMARY',
+          primary_name:  m.name,
+          all_names:     [m.name, ...(m.aliases || [])].filter((v, i, a) => v && a.indexOf(v) === i),
+          aliases:       m.aliases || [],
+          alias_count:   (m.aliases || []).length,
           list_source:   m.listSource,
+          list_name:     m.listName,
           programme:     m.programme,
+          nationality:   m.nationality,
+          dob:           m.dob,
         }));
         topScore = engineResult.topScore;
         screeningResult = engineResult.result;
@@ -298,10 +306,20 @@ router.post('/fuzzy-test', async (req, res) => {
       const result = eng.screen(name, { threshold: parseInt(threshold), maxResults: parseInt(limit) });
       const matches = result.matches.map(m => ({
         entry_id:     m.entryId,
-        matched_name: m.name,
+        // The name that actually matched (could be an alias)
+        matched_name: m.matchedName || m.name,
+        matched_via:  m.matchedVia  || 'PRIMARY',
+        // Primary registered name on the sanctions list
+        primary_name: m.name,
+        // All known names: primary + all aliases combined
+        all_names:    [m.name, ...(m.aliases || [])].filter((v, i, a) => v && a.indexOf(v) === i),
+        aliases:      m.aliases || [],
+        alias_count:  (m.aliases || []).length,
         entity_type:  m.type,
         source_code:  m.listSource,
+        list_name:    m.listName,
         nationality:  m.nationality,
+        dob:          m.dob,
         score:        m.score,
         match_type:   m.matchType,
         programme:    m.programme,
