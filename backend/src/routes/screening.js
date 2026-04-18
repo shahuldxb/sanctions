@@ -3,13 +3,22 @@ const router = express.Router();
 const { query } = require('../db/connection');
 const { v4: uuidv4 } = require('uuid');
 
-// ── In-memory engine (loaded at startup) ──────────────────────────────────────
+// ── In-memory sanctions engine ───────────────────────────────────────────────
 let _engine = null;
 function getEngine() {
   if (!_engine) {
     try { _engine = require('../services/sanctionsEngine'); } catch (e) { /* not loaded yet */ }
   }
   return _engine;
+}
+
+// ── In-memory PEP engine ──────────────────────────────────────────────────────
+let _pepEngine = null;
+function getPepEngine() {
+  if (!_pepEngine) {
+    try { _pepEngine = require('../services/pepEngine'); } catch (e) { /* not loaded yet */ }
+  }
+  return _pepEngine;
 }
 
 // ── GET all screening requests (root path) ────────────────────────────────────
@@ -67,23 +76,37 @@ router.get('/requests/:id', async (req, res) => {
   }
 });
 
-// ── GET engine status ─────────────────────────────────────────────────────────
+// ── GET engine status (sanctions + PEP) ────────────────────────────────────
 router.get('/engine-status', (req, res) => {
-  const eng = getEngine();
-  if (!eng) return res.json({ loaded: false, message: 'Engine not initialized' });
-  res.json(eng.getStatus());
+  const eng    = getEngine();
+  const pepEng = getPepEngine();
+  const sanctionsStatus = eng    ? eng.getStatus()    : { loaded: false, message: 'Sanctions engine not initialized' };
+  const pepStatus       = pepEng ? pepEng.getStatus() : { loaded: false, message: 'PEP engine not initialized' };
+  res.json({ sanctions: sanctionsStatus, pep: pepStatus });
 });
 
-// ── POST reload engine ────────────────────────────────────────────────────────
+// ── POST reload sanctions engine ───────────────────────────────────────
 router.post('/engine-reload', async (req, res) => {
   const eng = getEngine();
-  if (!eng) return res.status(503).json({ error: 'Engine not available' });
+  if (!eng) return res.status(503).json({ error: 'Sanctions engine not available' });
   try {
     const result = await eng.reload();
-    res.json({ success: true, ...result });
+    res.json({ success: true, engine: 'sanctions', ...result });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ── POST reload PEP engine (async — returns immediately) ───────────────────
+router.post('/pep-engine-reload', async (req, res) => {
+  const pepEng = getPepEngine();
+  if (!pepEng) return res.status(503).json({ error: 'PEP engine not available' });
+  res.json({ success: true, engine: 'pep', message: 'PEP RAM reload started. Use GET /api/screening/engine-status to monitor progress.' });
+  pepEng.reload().then(result => {
+    console.log(`[PepEngine] Reload complete: ${result.count.toLocaleString()} entries in ${result.elapsed}ms`);
+  }).catch(err => {
+    console.error('[PepEngine] Reload error:', err.message);
+  });
 });
 
 // ── POST new screening request (uses in-memory engine) ───────────────────────
@@ -93,7 +116,8 @@ router.post('/screen', async (req, res) => {
     if (!subjects || !subjects.length) return res.status(400).json({ error: 'subjects required' });
 
     const requestId = `SCR-${Date.now()}`;
-    const eng = getEngine();
+    const eng    = getEngine();
+    const pepEng = getPepEngine();
 
     // Create screening request record
     const reqResult = await query(`
@@ -131,14 +155,13 @@ router.post('/screen', async (req, res) => {
 
       const newSubject = subjectResult.recordset[0];
 
-      // ── Use in-memory engine if available, else fall back to DB ──────────
+      // ── Sanctions screening (in-memory or DB fallback) ─────────────────────
       let matches = [];
       let topScore = 0;
       let screeningResult = 'CLEAR';
       let engineUsed = 'DB_FALLBACK';
 
       if (eng && eng.getStatus().loaded) {
-        // Fast in-memory screening
         const engineResult = eng.screen(subject.subject_name, { threshold: 60, maxResults: 10 });
         matches = engineResult.matches.map(m => ({
           entry_id:      m.entryId,
@@ -159,14 +182,25 @@ router.post('/screen', async (req, res) => {
         }));
         topScore = engineResult.topScore;
         screeningResult = engineResult.result;
-        engineUsed = `IN_MEMORY (${engineResult.durationMs}ms, ${engineResult.candidatesEvaluated}/${engineResult.totalEntries} candidates)`;
+        engineUsed = `SANCTIONS_RAM (${engineResult.durationMs}ms, ${engineResult.candidatesEvaluated}/${engineResult.totalEntries} candidates)`;
       } else {
-        // DB fallback
         matches = await performFuzzyMatchDB(subject.subject_name);
         for (const m of matches) { if (m.score > topScore) topScore = m.score; }
         if (topScore >= 90) screeningResult = 'BLOCKED';
         else if (topScore >= 65) screeningResult = 'POTENTIAL_MATCH';
         else screeningResult = 'CLEAR';
+      }
+
+      // ── PEP screening (in-memory) ─────────────────────────────────────────────
+      let pepResult = 'CLEAR';
+      let pepMatches = [];
+      let pepEngineUsed = 'NOT_LOADED';
+
+      if (pepEng && pepEng.getStatus().loaded) {
+        const pepScreenResult = pepEng.screen(subject.subject_name, { threshold: 60, maxResults: 5 });
+        pepMatches    = pepScreenResult.matches;
+        pepResult     = pepScreenResult.result;   // 'PEP_MATCH' | 'PEP_POTENTIAL' | 'CLEAR'
+        pepEngineUsed = `PEP_RAM (${pepScreenResult.durationMs}ms, ${pepScreenResult.candidatesEvaluated}/${pepScreenResult.totalEntries} candidates)`;
       }
 
       // Persist matches
@@ -193,17 +227,26 @@ router.post('/screen', async (req, res) => {
       `, { result: screeningResult, score: topScore, id: newSubject.id });
 
       results.push({
-        subject: subject.subject_name,
-        result: screeningResult,
-        score: topScore,
-        matches: matches.length,
-        engineUsed
+        subject:        subject.subject_name,
+        // Sanctions outcome
+        result:         screeningResult,
+        score:          topScore,
+        matches:        matches.length,
+        engineUsed,
+        // PEP outcome
+        pepResult,
+        pepMatches:     pepMatches.length,
+        pepMatchDetail: pepMatches,
+        pepEngineUsed,
       });
     }
 
-    // Overall result
-    const overallResult = results.some(r => r.result === 'BLOCKED') ? 'BLOCKED' :
-                          results.some(r => r.result === 'POTENTIAL_MATCH') ? 'POTENTIAL_MATCH' : 'CLEAR';
+    // Overall result — PEP flags elevate to POTENTIAL_MATCH if not already BLOCKED
+    const overallResult =
+      results.some(r => r.result === 'BLOCKED')                                    ? 'BLOCKED' :
+      results.some(r => r.result === 'POTENTIAL_MATCH')                            ? 'POTENTIAL_MATCH' :
+      results.some(r => r.pepResult === 'PEP_MATCH' || r.pepResult === 'PEP_POTENTIAL') ? 'PEP_FLAGGED' :
+      'CLEAR';
 
     await query(`
       UPDATE screening_requests SET status = 'COMPLETED', overall_result = @overall_result,
