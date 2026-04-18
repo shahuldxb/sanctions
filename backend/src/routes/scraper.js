@@ -280,6 +280,205 @@ router.get('/run-log/:runId', (req, res) => {
   res.json({ run_id: runId, logs: entry ? (processLogs[entry[0]] || []) : [] });
 });
 
+// ─── Delta Operations: SSE stream + history for all 8 lists ────────────────
+
+// In-memory delta run state
+const deltaRunState = {
+  status: 'idle',        // idle | running | complete | error
+  startedAt: null,
+  completedAt: null,
+  currentList: null,
+  progress: 0,           // 0-100
+  results: [],           // per-list results
+  logs: [],              // all log lines
+  clients: [],           // SSE response objects
+};
+
+function pushDeltaSSE(data) {
+  const msg = `data: ${JSON.stringify(data)}\n\n`;
+  deltaRunState.clients.forEach(r => { try { r.write(msg); } catch (_) {} });
+}
+
+function deltaLog(msg, level = 'info') {
+  const entry = { ts: new Date().toISOString(), msg, level };
+  deltaRunState.logs.push(entry);
+  if (deltaRunState.logs.length > 500) deltaRunState.logs = deltaRunState.logs.slice(-500);
+  pushDeltaSSE({ type: 'log', ...entry, progress: deltaRunState.progress, currentList: deltaRunState.currentList });
+}
+
+// GET /api/scraper/delta-stream  — SSE live feed
+router.get('/delta-stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.flushHeaders();
+
+  deltaRunState.clients.push(res);
+
+  // Send current state immediately
+  res.write(`data: ${JSON.stringify({
+    type: 'state',
+    status: deltaRunState.status,
+    progress: deltaRunState.progress,
+    currentList: deltaRunState.currentList,
+    results: deltaRunState.results,
+    logs: deltaRunState.logs.slice(-100),
+  })}\n\n`);
+
+  const hb = setInterval(() => { try { res.write(': heartbeat\n\n'); } catch (_) { clearInterval(hb); } }, 15000);
+  req.on('close', () => {
+    clearInterval(hb);
+    deltaRunState.clients = deltaRunState.clients.filter(r => r !== res);
+  });
+});
+
+// POST /api/scraper/trigger-delta  — run full delta for all 8 lists
+router.post('/trigger-delta', async (req, res) => {
+  if (deltaRunState.status === 'running') {
+    return res.status(409).json({ error: 'Delta run already in progress' });
+  }
+
+  // Reset state
+  deltaRunState.status = 'running';
+  deltaRunState.startedAt = new Date().toISOString();
+  deltaRunState.completedAt = null;
+  deltaRunState.currentList = null;
+  deltaRunState.progress = 0;
+  deltaRunState.results = [];
+  deltaRunState.logs = [];
+
+  res.json({ message: 'Delta run started', startedAt: deltaRunState.startedAt });
+
+  // Run async
+  (async () => {
+    try {
+      const sources = await query('SELECT * FROM sanctions_list_sources WHERE is_active = 1 ORDER BY source_code');
+      const srcList = sources.recordset;
+      const total = srcList.length;
+
+      deltaLog(`Starting full delta run for ${total} sanctions lists`, 'info');
+      pushDeltaSSE({ type: 'start', total, lists: srcList.map(s => s.source_code) });
+
+      for (let i = 0; i < srcList.length; i++) {
+        const src = srcList[i];
+        deltaRunState.currentList = src.source_code;
+        deltaRunState.progress = Math.round((i / total) * 90);
+
+        deltaLog(`[${i+1}/${total}] Starting ${src.source_code}...`, 'info');
+        pushDeltaSSE({ type: 'list_start', list: src.source_code, index: i+1, total });
+
+        const runId = `DELTA-${Date.now()}-${src.source_code}`;
+        const listResult = { list: src.source_code, status: 'running', added: 0, updated: 0, deleted: 0, downloaded: 0, error: null, duration: 0 };
+        deltaRunState.results.push(listResult);
+
+        const t0 = Date.now();
+        try {
+          // Insert run history
+          await query(`INSERT INTO scrape_run_history (run_id, source_id, status) VALUES (@run_id, @source_id, 'RUNNING')`,
+            { run_id: runId, source_id: src.id });
+
+          const result = await realScrapeSource(src, (msg) => {
+            deltaLog(`  [${src.source_code}] ${msg}`, 'info');
+          });
+
+          listResult.downloaded = result.downloaded || 0;
+          listResult.added      = result.added      || 0;
+          listResult.updated    = result.updated    || 0;
+          listResult.deleted    = result.deleted    || 0;
+          listResult.status     = 'success';
+          listResult.duration   = Math.round((Date.now() - t0) / 1000);
+
+          // Update run history
+          await query(`UPDATE scrape_run_history SET completed_at = GETDATE(), status = 'SUCCESS',
+            records_downloaded = @d, records_added = @a, records_updated = @u, records_deleted = @del
+            WHERE run_id = @run_id`,
+            { run_id: runId, d: listResult.downloaded, a: listResult.added, u: listResult.updated, del: listResult.deleted });
+
+          // Update source last_scraped
+          await query(`UPDATE sanctions_list_sources SET last_scraped = GETDATE(), last_scrape_status = 'SUCCESS',
+            total_entries = @total WHERE id = @id`,
+            { id: src.id, total: listResult.downloaded });
+
+          deltaLog(`  [${src.source_code}] Done: +${listResult.added} added, ~${listResult.updated} updated, -${listResult.deleted} delisted (${listResult.duration}s)`, 'success');
+
+        } catch (err) {
+          listResult.status  = 'error';
+          listResult.error   = err.message;
+          listResult.duration = Math.round((Date.now() - t0) / 1000);
+          await query(`UPDATE scrape_run_history SET completed_at = GETDATE(), status = 'FAILED', error_message = @e WHERE run_id = @run_id`,
+            { run_id: runId, e: err.message }).catch(() => {});
+          deltaLog(`  [${src.source_code}] ERROR: ${err.message}`, 'error');
+        }
+
+        pushDeltaSSE({ type: 'list_complete', list: src.source_code, result: listResult, results: deltaRunState.results });
+      }
+
+      deltaRunState.progress    = 100;
+      deltaRunState.status      = 'complete';
+      deltaRunState.completedAt = new Date().toISOString();
+      deltaRunState.currentList = null;
+
+      const totals = deltaRunState.results.reduce((acc, r) => ({
+        downloaded: acc.downloaded + r.downloaded,
+        added:      acc.added      + r.added,
+        updated:    acc.updated    + r.updated,
+        deleted:    acc.deleted    + r.deleted,
+      }), { downloaded: 0, added: 0, updated: 0, deleted: 0 });
+
+      deltaLog(`Delta run complete. Total: ${totals.downloaded.toLocaleString()} downloaded, +${totals.added} added, ~${totals.updated} updated, -${totals.deleted} delisted`, 'success');
+      pushDeltaSSE({ type: 'complete', success: true, results: deltaRunState.results, totals });
+
+      // Reload in-memory engine after delta
+      try {
+        const { sanctionsEngine } = require('../services/sanctionsEngine');
+        if (sanctionsEngine && typeof sanctionsEngine.reload === 'function') {
+          deltaLog('Reloading in-memory screening engine...', 'info');
+          await sanctionsEngine.reload();
+          deltaLog('In-memory engine reloaded successfully', 'success');
+        }
+      } catch (_) {}
+
+    } catch (err) {
+      deltaRunState.status = 'error';
+      deltaRunState.completedAt = new Date().toISOString();
+      deltaLog(`Fatal error: ${err.message}`, 'error');
+      pushDeltaSSE({ type: 'error', message: err.message });
+    }
+  })();
+});
+
+// GET /api/scraper/delta-status  — current run state (polling fallback)
+router.get('/delta-status', (req, res) => {
+  res.json({
+    status:       deltaRunState.status,
+    startedAt:    deltaRunState.startedAt,
+    completedAt:  deltaRunState.completedAt,
+    currentList:  deltaRunState.currentList,
+    progress:     deltaRunState.progress,
+    results:      deltaRunState.results,
+    recentLogs:   deltaRunState.logs.slice(-50),
+  });
+});
+
+// GET /api/scraper/delta-history  — last 30 delta runs from DB
+router.get('/delta-history', async (req, res) => {
+  try {
+    const result = await query(`
+      SELECT TOP 30
+        r.run_id, r.started_at, r.completed_at, r.status,
+        r.records_downloaded, r.records_added, r.records_updated, r.records_deleted,
+        s.source_code
+      FROM scrape_run_history r
+      LEFT JOIN sanctions_list_sources s ON r.source_id = s.id
+      ORDER BY r.started_at DESC
+    `);
+    res.json(result.recordset);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // OFAC delta history
 router.get('/ofac-delta/history', async (req, res) => {
   try {

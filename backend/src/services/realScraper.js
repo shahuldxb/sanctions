@@ -47,15 +47,33 @@ function parseDate(v) {
 }
 
 /**
- * Upsert a batch of entries into sanctions_entries.
- * Returns { added, updated }.
+ * Upsert a batch of entries into sanctions_entries AND delist entries
+ * that were previously active but are no longer in the downloaded list.
+ * Returns { added, updated, delisted }.
  */
 async function upsertBatch(sourceId, entries) {
-  let added = 0, updated = 0;
+  let added = 0, updated = 0, delisted = 0;
 
+  // ── Step 1: Build a Set of all external_ids in the downloaded list ──────────
+  const downloadedIds = new Set(entries.map(e => e.external_id).filter(Boolean));
+
+  // ── Step 2: Get all currently ACTIVE external_ids for this source from DB ───
+  let activeDbIds = new Set();
+  try {
+    const activeRows = await query(
+      `SELECT external_id FROM sanctions_entries WHERE source_id = @sid AND status IN ('ACTIVE','Active')`,
+      { sid: sourceId }
+    );
+    for (const r of activeRows.recordset) {
+      if (r.external_id) activeDbIds.add(r.external_id);
+    }
+  } catch (err) {
+    // Non-fatal: continue without delist
+  }
+
+  // ── Step 3: Upsert each downloaded entry ────────────────────────────────────
   for (const e of entries) {
     try {
-      // Check if exists by external_id
       const existing = await query(
         'SELECT id, primary_name, status FROM sanctions_entries WHERE source_id = @sid AND external_id = @eid',
         { sid: sourceId, eid: e.external_id }
@@ -104,7 +122,26 @@ async function upsertBatch(sourceId, entries) {
     }
   }
 
-  return { added, updated };
+  // ── Step 4: Delist entries that were ACTIVE in DB but NOT in this download ───
+  // Only run if we downloaded a meaningful number of entries (safety guard)
+  if (downloadedIds.size > 100 && activeDbIds.size > 0) {
+    for (const dbId of activeDbIds) {
+      if (!downloadedIds.has(dbId)) {
+        try {
+          await query(
+            `UPDATE sanctions_entries SET status = 'DELISTED', updated_at = GETDATE()
+             WHERE source_id = @sid AND external_id = @eid`,
+            { sid: sourceId, eid: dbId }
+          );
+          delisted++;
+        } catch (err) {
+          // Skip
+        }
+      }
+    }
+  }
+
+  return { added, updated, delisted };
 }
 
 // ── OFAC Scraper ──────────────────────────────────────────────────────────────
@@ -144,8 +181,8 @@ async function scrapeOFAC(sourceId, onProgress) {
   }
 
   onProgress(`Upserting ${entries.length.toLocaleString()} OFAC entries into database...`);
-  const { added, updated } = await upsertBatch(sourceId, entries);
-  return { downloaded: entries.length, added, updated, deleted: 0 };
+  const { added, updated, delisted } = await upsertBatch(sourceId, entries);
+  return { downloaded: entries.length, added, updated, deleted: delisted };
 }
 
 // ── EU Scraper ────────────────────────────────────────────────────────────────
@@ -192,8 +229,8 @@ async function scrapeEU(sourceId, onProgress) {
   }
 
   onProgress(`Upserting ${entries.length.toLocaleString()} EU entries...`);
-  const { added, updated } = await upsertBatch(sourceId, entries);
-  return { downloaded: entries.length, added, updated, deleted: 0 };
+  const { added, updated, delisted } = await upsertBatch(sourceId, entries);
+  return { downloaded: entries.length, added, updated, deleted: delisted };
 }
 
 // ── UN Scraper ────────────────────────────────────────────────────────────────
@@ -237,8 +274,8 @@ async function scrapeUN(sourceId, onProgress) {
   }
 
   onProgress(`Upserting ${entries.length.toLocaleString()} UN entries...`);
-  const { added, updated } = await upsertBatch(sourceId, entries);
-  return { downloaded: entries.length, added, updated, deleted: 0 };
+  const { added, updated, delisted } = await upsertBatch(sourceId, entries);
+  return { downloaded: entries.length, added, updated, deleted: delisted };
 }
 
 // ── UK Scraper ────────────────────────────────────────────────────────────────
@@ -282,8 +319,8 @@ async function scrapeUK(sourceId, onProgress) {
   }
 
   onProgress(`Upserting ${entries.length.toLocaleString()} UK entries...`);
-  const { added, updated } = await upsertBatch(sourceId, entries);
-  return { downloaded: entries.length, added, updated, deleted: 0 };
+  const { added, updated, delisted } = await upsertBatch(sourceId, entries);
+  return { downloaded: entries.length, added, updated, deleted: delisted };
 }
 
 // ── SECO Scraper ──────────────────────────────────────────────────────────────
@@ -322,8 +359,8 @@ async function scrapeSECO(sourceId, onProgress) {
     return { downloaded: 0, added: 0, updated: 0, deleted: 0, skipped: true };
   }
 
-  const { added, updated } = await upsertBatch(sourceId, entries);
-  return { downloaded: entries.length, added, updated, deleted: 0 };
+  const { added, updated, delisted } = await upsertBatch(sourceId, entries);
+  return { downloaded: entries.length, added, updated, deleted: delisted };
 }
 
 // ── BIS Scraper ───────────────────────────────────────────────────────────────
@@ -362,8 +399,8 @@ async function scrapeBIS(sourceId, onProgress) {
     return { downloaded: 0, added: 0, updated: 0, deleted: 0, skipped: true };
   }
 
-  const { added, updated } = await upsertBatch(sourceId, entries);
-  return { downloaded: entries.length, added, updated, deleted: 0 };
+  const { added, updated, delisted } = await upsertBatch(sourceId, entries);
+  return { downloaded: entries.length, added, updated, deleted: delisted };
 }
 
 // ── DFAT Scraper ──────────────────────────────────────────────────────────────
@@ -402,8 +439,8 @@ async function scrapeDFAT(sourceId, onProgress) {
     return { downloaded: 0, added: 0, updated: 0, deleted: 0, skipped: true };
   }
 
-  const { added, updated } = await upsertBatch(sourceId, entries);
-  return { downloaded: entries.length, added, updated, deleted: 0 };
+  const { added, updated, delisted } = await upsertBatch(sourceId, entries);
+  return { downloaded: entries.length, added, updated, deleted: delisted };
 }
 
 // ── MAS Scraper ───────────────────────────────────────────────────────────────
@@ -442,8 +479,8 @@ async function scrapeMAS(sourceId, onProgress) {
     return { downloaded: 0, added: 0, updated: 0, deleted: 0, skipped: true };
   }
 
-  const { added, updated } = await upsertBatch(sourceId, entries);
-  return { downloaded: entries.length, added, updated, deleted: 0 };
+  const { added, updated, delisted } = await upsertBatch(sourceId, entries);
+  return { downloaded: entries.length, added, updated, deleted: delisted };
 }
 
 // ── Main dispatcher ───────────────────────────────────────────────────────────
