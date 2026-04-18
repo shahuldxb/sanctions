@@ -3,6 +3,7 @@ const router = express.Router();
 const { query } = require('../db/connection');
 const axios = require('axios');
 const { v4: uuidv4 } = require('uuid');
+const { scrapeSource: realScrapeSource } = require('../services/realScraper');
 
 // Scraper status store
 const scraperStatus = {};
@@ -154,60 +155,32 @@ router.put('/scheduler/:id', async (req, res) => {
   }
 });
 
-// Actual scraping logic (simulated with realistic data for demo)
+// Real scraping logic — downloads and parses actual sanctions data from official sources
 async function scrapeSource(source, runId) {
-  const results = { downloaded: 0, added: 0, updated: 0, deleted: 0 };
-  
+  const results = await realScrapeSource(source, (msg) => {
+    console.log(`[Scraper:${source.source_code}] ${msg}`);
+  });
+
+  // Add audit log entry
   try {
-    // Simulate downloading from real endpoints
-    // In production, this would actually download and parse the XML/CSV files
-    
-    if (source.source_code === 'OFAC') {
-      // OFAC SDN list - typically 12,000+ entries
-      results.downloaded = Math.floor(Math.random() * 100) + 12500;
-      results.added = Math.floor(Math.random() * 5);
-      results.updated = Math.floor(Math.random() * 3);
-      
-      // Log the change
-      await query(`
-        INSERT INTO sanctions_change_log (source_id, external_id, change_type, changed_fields, scrape_run_id)
-        VALUES (@source_id, 'OFAC-DELTA', 'UPDATE', '{"action":"Scheduled scrape completed","records":${results.downloaded}}', @run_id)
-      `, { source_id: source.id, run_id: runId });
-      
-    } else if (source.source_code === 'EU') {
-      results.downloaded = Math.floor(Math.random() * 50) + 8900;
-      results.added = Math.floor(Math.random() * 3);
-      results.updated = Math.floor(Math.random() * 2);
-      
-    } else if (source.source_code === 'UN') {
-      results.downloaded = Math.floor(Math.random() * 20) + 3400;
-      results.added = Math.floor(Math.random() * 2);
-      results.updated = Math.floor(Math.random() * 1);
-      
-    } else if (source.source_code === 'UK') {
-      results.downloaded = Math.floor(Math.random() * 30) + 5600;
-      results.added = Math.floor(Math.random() * 3);
-      results.updated = Math.floor(Math.random() * 2);
-      
-    } else {
-      results.downloaded = Math.floor(Math.random() * 500) + 1000;
-      results.added = Math.floor(Math.random() * 2);
-      results.updated = 0;
-    }
-    
-    // Add audit log entry
     await query(`
       INSERT INTO audit_log (event_type, entity_type, entity_id, action, performed_by, description)
       VALUES ('LIST_SCRAPE', 'SANCTIONS_LIST', @source_code, 'UPDATE', 'System', @description)
-    `, { 
-      source_code: source.source_code, 
-      description: `${source.source_code} list scraped: ${results.downloaded} records, ${results.added} new, ${results.updated} updated` 
+    `, {
+      source_code: source.source_code,
+      description: `${source.source_code} scraped: ${results.downloaded} records, +${results.added} new, ~${results.updated} updated`
     });
-    
-  } catch (err) {
-    throw err;
-  }
-  
+  } catch (_) {}
+
+  // After scrape, trigger engine reload so new entries are immediately searchable
+  try {
+    const eng = require('../services/sanctionsEngine');
+    const status = eng.getStatus();
+    if (status.loaded) {
+      eng.reload().catch(e => console.error('[Scraper] Engine reload failed:', e.message));
+    }
+  } catch (_) {}
+
   return results;
 }
 

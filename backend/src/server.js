@@ -73,8 +73,16 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.API_PORT || 5000;
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', async () => {
   console.log(`Sanctions Engine API running on port ${PORT}`);
+  // Load all sanctions entries into RAM for fast in-memory screening
+  try {
+    const sanctionsEngine = require('./services/sanctionsEngine');
+    const result = await sanctionsEngine.loadEntries();
+    console.log(`[Startup] In-memory engine ready: ${result.count.toLocaleString()} entries loaded in ${result.elapsed}ms`);
+  } catch (err) {
+    console.error('[Startup] In-memory engine load failed (will use DB fallback):', err.message);
+  }
 });
 
 module.exports = app;

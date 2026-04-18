@@ -2,6 +2,19 @@ const express = require('express');
 const router = express.Router();
 const { query, sql, getPool } = require('../db/connection');
 
+// In-memory engine sync helper — fires after every DB write
+function syncEngine(action, rowOrId) {
+  try {
+    const eng = require('../services/sanctionsEngine');
+    if (!eng.getStatus().loaded) return; // engine not ready yet, skip
+    if (action === 'upsert' && rowOrId) eng.upsertEntry(rowOrId);
+    else if (action === 'remove' && rowOrId) eng.removeEntry(rowOrId);
+    else if (action === 'patch' && rowOrId) eng.patchEntry(rowOrId.id, rowOrId.fields);
+  } catch (e) {
+    console.error('[sanctions route] engine sync error:', e.message);
+  }
+}
+
 // GET all sanctions entries (root path - maps to /entries)
 router.get('/', async (req, res) => {
   try {
@@ -185,7 +198,7 @@ router.post('/entries', async (req, res) => {
     `, { source_id: parseInt(source_id), external_id, entry_type, primary_name, dob, nationality, programme, listing_date, status: status || 'ACTIVE', remarks });
     
     const newEntry = result.recordset[0];
-    
+
     // Insert aliases if provided
     if (aliases && aliases.length) {
       for (const alias of aliases) {
@@ -195,7 +208,14 @@ router.post('/entries', async (req, res) => {
         `, { entry_id: newEntry.id, alias_name: alias.alias_name, alias_type: alias.alias_type || 'AKA', alias_quality: alias.alias_quality || 'STRONG' });
       }
     }
-    
+
+    // Sync in-memory engine: fetch source_code for the new entry
+    try {
+      const srcRow = await query('SELECT source_code, source_name FROM sanctions_list_sources WHERE id = @id', { id: newEntry.source_id });
+      const src = srcRow.recordset[0] || {};
+      syncEngine('upsert', { ...newEntry, source_code: src.source_code, source_name: src.source_name });
+    } catch (_) {}
+
     res.status(201).json(newEntry);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -214,16 +234,28 @@ router.put('/entries/:id', async (req, res) => {
       OUTPUT INSERTED.*
       WHERE id = @id
     `, { id: parseInt(req.params.id), primary_name, dob, nationality, programme, listing_date, status, remarks });
-    res.json(result.recordset[0]);
+
+    const updated = result.recordset[0];
+    // Sync in-memory engine with the updated row
+    try {
+      const srcRow = await query('SELECT source_code, source_name FROM sanctions_list_sources WHERE id = @id', { id: updated.source_id });
+      const src = srcRow.recordset[0] || {};
+      syncEngine('upsert', { ...updated, source_code: src.source_code, source_name: src.source_name });
+    } catch (_) {}
+
+    res.json(updated);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// DELETE entry (soft delete)
+// DELETE entry (soft delete — marks as DELISTED, removes from screening index)
 router.delete('/entries/:id', async (req, res) => {
   try {
-    await query(`UPDATE sanctions_entries SET status = 'DELISTED', delisted_date = GETDATE(), updated_at = GETDATE() WHERE id = @id`, { id: parseInt(req.params.id) });
+    const id = parseInt(req.params.id);
+    await query(`UPDATE sanctions_entries SET status = 'DELISTED', delisted_date = GETDATE(), updated_at = GETDATE() WHERE id = @id`, { id });
+    // Remove from in-memory engine immediately
+    syncEngine('remove', id);
     res.json({ message: 'Entry delisted successfully' });
   } catch (err) {
     res.status(500).json({ error: err.message });
