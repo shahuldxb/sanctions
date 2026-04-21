@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef, useCallback } from 'react'
 import { api } from '../../api'
 import { Badge, Spinner, PageHeader, StatCard, ProgressBar, Field } from '../../components/ui'
 import { SetPageHelp } from '../../components/HelpOverlay'
-import { Download, Play, Square, RefreshCw, Terminal, Clock, Database, Wifi, WifiOff, Globe, AlertCircle, Timer } from 'lucide-react'
+import { Download, Play, Square, RefreshCw, Terminal, Clock, Database, Wifi, WifiOff, Globe, AlertCircle, Timer, Trash2, MemoryStick } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 const PAGE_META = {
@@ -86,7 +86,7 @@ function LiveClockCard() {
   )
 }
 
-function SourceCard({ src, st, isRunning, onRun, onStop, onToggleLogs, showingLogs }: {
+function SourceCard({ src, st, isRunning, onRun, onStop, onToggleLogs, showingLogs, onClearMem, onLoadMem }: {
   src: typeof SOURCES[0]
   st: any
   isRunning: boolean
@@ -94,6 +94,8 @@ function SourceCard({ src, st, isRunning, onRun, onStop, onToggleLogs, showingLo
   onStop: () => void
   onToggleLogs: () => void
   showingLogs: boolean
+  onClearMem: () => void
+  onLoadMem: () => void
 }) {
   const liveElapsed = useLiveTimer(isRunning ? (st.run_started_at || null) : null)
 
@@ -155,18 +157,56 @@ function SourceCard({ src, st, isRunning, onRun, onStop, onToggleLogs, showingLo
             </div>
           </div>
         </div>
+        {/* In-Memory Table & RAM counts */}
+        <div className="mt-2 border-t border-slate-700/50 pt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+          <div>
+            <div className="text-slate-500 mb-0.5 flex items-center gap-1"><Database size={9} /> In-Mem Table</div>
+            <div className={`font-mono font-semibold ${(st.in_mem_count || 0) > 0 ? 'text-cyan-400' : 'text-slate-500'}`}>
+              {(st.in_mem_count || 0) > 0 ? (st.in_mem_count || 0).toLocaleString() : '—'}
+            </div>
+          </div>
+          <div>
+            <div className="text-slate-500 mb-0.5 flex items-center gap-1"><MemoryStick size={9} /> RAM Index</div>
+            <div className={`font-mono font-semibold ${(st.in_ram_count || 0) > 0 ? 'text-violet-400' : 'text-slate-500'}`}>
+              {(st.in_ram_count || 0) > 0 ? (st.in_ram_count || 0).toLocaleString() : '—'}
+            </div>
+          </div>
+        </div>
+
         {!isRunning && st.last_run_status === 'FAILED' && st.error_message && (
           <div className="mt-2 flex items-start gap-1 text-xs text-red-300 bg-red-900/20 rounded p-1.5">
             <AlertCircle size={10} className="mt-0.5 shrink-0" />
             <span className="truncate">{st.error_message}</span>
           </div>
         )}
-        <button
-          onClick={onToggleLogs}
-          className={`mt-2 text-xs flex items-center gap-1 transition-colors ${showingLogs ? 'text-blue-400' : 'text-slate-500 hover:text-blue-400'}`}
-        >
-          <Terminal size={10} /> {showingLogs ? 'Hide Logs' : 'Show Logs'}
-        </button>
+
+        {/* Action row: logs + clear buttons */}
+        <div className="mt-2 flex items-center justify-between gap-1">
+          <button
+            onClick={onToggleLogs}
+            className={`text-xs flex items-center gap-1 transition-colors ${showingLogs ? 'text-blue-400' : 'text-slate-500 hover:text-blue-400'}`}
+          >
+            <Terminal size={10} /> {showingLogs ? 'Hide Logs' : 'Show Logs'}
+          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={onClearMem}
+              disabled={isRunning}
+              title="Clear In-Memory Table — delete rows from sanctions_entries_mem for this source"
+              className="flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded bg-red-900/20 text-red-400 hover:bg-red-900/40 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              <Trash2 size={9} /> Clear Mem
+            </button>
+            <button
+              onClick={onLoadMem}
+              disabled={isRunning}
+              title="Load In-Memory Table — copy rows from sanctions_entries into sanctions_entries_mem"
+              className="flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded bg-cyan-900/20 text-cyan-400 hover:bg-cyan-900/40 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              <MemoryStick size={9} /> Load Mem
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   )
@@ -298,6 +338,28 @@ export default function ScraperControl() {
     toast('Scraper stopped')
   }
 
+  const clearMem = async (code: string) => {
+    if (!window.confirm(`Delete ${code} rows from sanctions_entries_mem (SQL in-memory table)?`)) return
+    try {
+      await api.post(`/scraper/clear-mem/${code}`)
+      toast.success(`${code} in-memory table cleared`)
+      loadStatus()
+    } catch (err: any) {
+      toast.error(`Clear mem failed: ${err.message}`)
+    }
+  }
+
+  const loadMem = async (code: string) => {
+    try {
+      toast.loading(`Loading ${code} into in-memory table...`, { id: `load-mem-${code}` })
+      const r = await api.post(`/scraper/load-mem/${code}`)
+      toast.success(`${code}: ${r.data?.loaded?.toLocaleString() || 0} rows loaded into in-memory table`, { id: `load-mem-${code}` })
+      loadStatus()
+    } catch (err: any) {
+      toast.error(`Load mem failed: ${err.message}`, { id: `load-mem-${code}` })
+    }
+  }
+
   const runAll = async () => {
     setLiveLog([`[${nowIST()}] Starting ALL scrapers sequentially...`])
     for (const src of SOURCES) {
@@ -364,6 +426,8 @@ export default function ScraperControl() {
               onStop={() => stopScraper(src.code)}
               onToggleLogs={() => setActiveSource(activeSource === src.code ? null : src.code)}
               showingLogs={activeSource === src.code}
+              onClearMem={() => clearMem(src.code)}
+              onLoadMem={() => loadMem(src.code)}
             />
           )
         })}

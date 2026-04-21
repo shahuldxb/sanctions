@@ -272,7 +272,75 @@ async function _doLoad() {
   }
 }
 
-// ── DB fallback screening (when RAM index is empty) ──────────────────────────
+// ── Tier-2 fallback: SQL in-memory table (sanctions_entries_mem) ─────────────
+async function screenUnifiedMem(name, opts = {}) {
+  const { threshold = 70, maxResults = 50 } = opts;
+  const candidateThreshold = Math.max(40, threshold - 20);
+  const tokens = tokenize(name);
+  if (!tokens.length) return null; // signal to fall through to disk
+
+  // Check if sanctions_entries_mem has any rows at all
+  const { query } = require('../db/connection');
+  const countRow = await query('SELECT COUNT(*) AS cnt FROM sanctions_entries_mem').catch(() => null);
+  const memCount = countRow?.recordset?.[0]?.cnt || 0;
+  if (memCount === 0) return null; // nothing in mem table, fall through to disk
+
+  const primaryLike = tokens.map(t => `primary_name LIKE '%${t.replace(/'/g,"''")}%'`).join(' AND ');
+  const aliasLike   = tokens.map(t => `ISNULL(aliases,'') LIKE '%${t.replace(/'/g,"''")}%'`).join(' AND ');
+  const whereClause = `(${primaryLike}) OR (${aliasLike})`;
+
+  // Also check PEP entries from pep_entries (PEP has no mem table, always from disk)
+  const [memRows, pepRows] = await Promise.all([
+    query(`
+      SELECT TOP 300 id, source_id, source_code, source_code AS source_name,
+        'SANCTIONS' AS list_category,
+        external_id, entry_type, primary_name,
+        aliases, dob AS birth_date, nationality, programme,
+        status, listing_date
+      FROM sanctions_entries_mem
+      WHERE ${whereClause}
+    `).then(r => r.recordset).catch(() => []),
+    query(`
+      SELECT TOP 200 id, source AS source_code,
+        CASE source
+          WHEN 'OPENSANCTIONS_PEP' THEN 'OpenSanctions PEP'
+          WHEN 'WIKIDATA' THEN 'Wikidata SPARQL'
+          WHEN 'ICIJ' THEN 'ICIJ Offshore Leaks'
+          ELSE source END AS source_name,
+        'PEP' AS list_category,
+        external_id, schema_type AS entry_type, primary_name,
+        aliases, birth_date, countries, nationality, position,
+        political_party, gender, dataset, adverse_links,
+        wikidata_id, icij_node_id, status, first_seen AS listing_date
+      FROM pep_entries
+      WHERE status IN ('ACTIVE','DELISTED') AND (
+        ${tokens.map(t => `primary_name LIKE '%${t.replace(/'/g,"''")}%'`).join(' AND ')}
+        OR ISNULL(aliases,'') LIKE '%${tokens[0].replace(/'/g,"''")}%'
+      )
+    `).then(r => r.recordset).catch(() => []),
+  ]);
+
+  const candidates = [...memRows, ...pepRows];
+  if (!candidates.length) return null; // nothing found, fall through
+
+  const results = [];
+  for (const entry of candidates) {
+    const names = [entry.primary_name];
+    if (entry.aliases) for (const a of entry.aliases.split(/[|,;]/)) { const t = a.trim(); if (t) names.push(t); }
+    let best = 0, bestMatchedName = entry.primary_name;
+    for (const n of names) {
+      const s = scoreName(name, n);
+      if (s > best) { best = s; bestMatchedName = n; }
+    }
+    if (best >= candidateThreshold) results.push({ ...entry, score: best, matchedName: bestMatchedName });
+  }
+  results.sort((a, b) => b.score - a.score);
+  const filtered = results.filter(r => r.score >= threshold);
+  if (!filtered.length) return null; // nothing above threshold, fall through to disk
+  return { results: filtered.slice(0, maxResults), totalInRAM: 0, indexReady: false, memFallback: true, query: name };
+}
+
+// ── Tier-3 fallback: disk table (sanctions_entries) ───────────────────────────
 async function screenUnifiedDB(name, opts = {}) {
   const { threshold = 70, maxResults = 50 } = opts;
   // Use a lower threshold for DB candidate retrieval to avoid missing near-exact matches
@@ -514,6 +582,7 @@ setTimeout(() => {
 module.exports = {
   loadUnified,
   screenUnified,
+  screenUnifiedMem,
   screenUnifiedDB,
   getUnifiedStatus,
   reloadCategory,

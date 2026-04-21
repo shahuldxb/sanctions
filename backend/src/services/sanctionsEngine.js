@@ -541,6 +541,31 @@ function getStatus() {
   };
 }
 
+/**
+ * Return count of entries in the Node.js RAM index for a given source_code.
+ */
+function getCountBySource(sourceCode) {
+  if (!_entries || !_entries.size) return 0;
+  let count = 0;
+  for (const entry of _entries.values()) {
+    if (entry.listSource === sourceCode) count++;
+  }
+  return count;
+}
+
+/**
+ * Return a map of source_code → count for all sources currently in RAM.
+ */
+function getCountsAllSources() {
+  const counts = {};
+  if (!_entries || !_entries.size) return counts;
+  for (const entry of _entries.values()) {
+    const src = entry.listSource || 'UNKNOWN';
+    counts[src] = (counts[src] || 0) + 1;
+  }
+  return counts;
+}
+
 // ── Reload (called after scraper runs) ───────────────────────────────────────
 async function reload() {
   _entries    = new Map();
@@ -557,4 +582,4 @@ setInterval(() => {
   reload().catch(err => console.error('[SanctionsEngine] Auto-reload failed:', err.message));
 }, 3 * 60 * 60 * 1000);
 
-module.exports = { loadEntries, screen, getStatus, reload, upsertEntry, removeEntry, patchEntry, LIST_PRIORITY };
+module.exports = { loadEntries, screen, getStatus, getCountBySource, getCountsAllSources, reload, upsertEntry, removeEntry, patchEntry, LIST_PRIORITY };

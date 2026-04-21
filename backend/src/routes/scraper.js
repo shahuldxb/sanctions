@@ -12,7 +12,7 @@ const scraperStatus = {};
 router.get('/status', async (req, res) => {
   try {
     const sources = await query(`
-      SELECT s.*, 
+      SELECT s.*,
         (SELECT TOP 1 status FROM scrape_run_history WHERE source_id = s.id ORDER BY started_at DESC) as last_run_status,
         (SELECT TOP 1 started_at FROM scrape_run_history WHERE source_id = s.id ORDER BY started_at DESC) as last_run_at,
         (SELECT TOP 1 completed_at FROM scrape_run_history WHERE source_id = s.id ORDER BY started_at DESC) as last_run_completed,
@@ -21,13 +21,29 @@ router.get('/status', async (req, res) => {
       FROM sanctions_list_sources s
       ORDER BY source_code
     `);
-    
+
+    // Per-source in-memory table counts
+    let memCounts = {};
+    try {
+      const memRows = await query(`SELECT source_code, COUNT(*) AS cnt FROM sanctions_entries_mem GROUP BY source_code`);
+      for (const r of memRows.recordset) memCounts[r.source_code] = r.cnt;
+    } catch (_) {}
+
+    // Per-source RAM index counts
+    let ramCounts = {};
+    try {
+      const eng = require('../services/sanctionsEngine');
+      ramCounts = eng.getCountsAllSources ? eng.getCountsAllSources() : {};
+    } catch (_) {}
+
     const result = sources.recordset.map(s => ({
       ...s,
-      is_running: scraperStatus[s.source_code]?.running || false,
-      progress: scraperStatus[s.source_code]?.progress || 0
+      is_running:    scraperStatus[s.source_code]?.running || false,
+      progress:      scraperStatus[s.source_code]?.progress || 0,
+      in_mem_count:  memCounts[s.source_code] || 0,
+      in_ram_count:  ramCounts[s.source_code] || 0,
     }));
-    
+
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -61,13 +77,34 @@ router.post('/trigger/:sourceCode', async (req, res) => {
     processDetails[runId] = { status: 'running', progress: 0 };
     processLogs[runId] = [];
     addLog(runId, `Starting ${sourceCode} scraper...`, 'info');
-    
+
+    // ── FRESH LOAD: delete existing rows for this source before scraping ─────
+    try {
+      addLog(runId, `🗑 Deleting existing ${sourceCode} rows from sanctions_entries...`, 'info');
+      const del = await query(
+        `DELETE FROM sanctions_entries WHERE source_id = @sid`,
+        { sid: src.id }
+      );
+      addLog(runId, `✓ Deleted rows from sanctions_entries for ${sourceCode}`, 'info');
+    } catch (e) {
+      addLog(runId, `⚠ Delete from sanctions_entries failed: ${e.message}`, 'warn');
+    }
+    try {
+      await query(
+        `DELETE FROM sanctions_entries_mem WHERE source_id = @sid`,
+        { sid: src.id }
+      );
+      addLog(runId, `✓ Cleared sanctions_entries_mem for ${sourceCode}`, 'info');
+    } catch (e) {
+      addLog(runId, `⚠ Clear sanctions_entries_mem failed: ${e.message}`, 'warn');
+    }
+
     // Create run history record
     await query(`
       INSERT INTO scrape_run_history (run_id, source_id, status)
       VALUES (@run_id, @source_id, 'RUNNING')
     `, { run_id: runId, source_id: src.id });
-    
+
     // Start async scraping
     scrapeSource(src, runId).then(async (result) => {
       scraperStatus[sourceCode] = { running: false, progress: 100, runId, lastResult: result };
@@ -84,7 +121,32 @@ router.post('/trigger/:sourceCode', async (req, res) => {
         UPDATE sanctions_list_sources SET last_scraped = GETDATE(), last_scrape_status = 'SUCCESS', total_entries = @total
         WHERE id = @id
       `, { id: src.id, total: result.downloaded });
-      
+
+      // ── Populate sanctions_entries_mem from freshly inserted rows ────────────────
+      try {
+        await query(`
+          INSERT INTO sanctions_entries_mem
+            (id, source_id, source_code, external_id, entry_type, primary_name,
+             aliases, dob, nationality, programme, status, listing_date)
+          SELECT
+            e.id, e.source_id, s.source_code, e.external_id, e.entry_type, e.primary_name,
+            (
+              SELECT STRING_AGG(a.alias_name, '|')
+              FROM sanctions_aliases a
+              WHERE a.entry_id = e.id
+            ) AS aliases,
+            e.dob, e.nationality, e.programme, e.status,
+            CONVERT(NVARCHAR(30), e.listing_date, 23)
+          FROM sanctions_entries e
+          JOIN sanctions_list_sources s ON s.id = e.source_id
+          WHERE e.source_id = @sid
+            AND e.status IN ('Active','ACTIVE')
+        `, { sid: src.id });
+        addLog(runId, `✓ Populated sanctions_entries_mem for ${sourceCode}`, 'info');
+      } catch (e) {
+        addLog(runId, `⚠ Populate sanctions_entries_mem failed: ${e.message}`, 'warn');
+      }
+
     }).catch(async (err) => {
       scraperStatus[sourceCode] = { running: false, progress: 0, error: err.message };
       await query(`
@@ -764,6 +826,60 @@ router.get('/scheduler-jobs', async (req, res) => {
       scrape_interval_hours: s.scrape_interval_hours,
     }));
     res.json(jobs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/scraper/clear-mem/:sourceCode
+// Deletes all rows for this source from sanctions_entries_mem (SQL in-memory table)
+router.post('/clear-mem/:sourceCode', async (req, res) => {
+  try {
+    const { sourceCode } = req.params;
+    const src = await query('SELECT id FROM sanctions_list_sources WHERE source_code = @code', { code: sourceCode });
+    if (!src.recordset.length) return res.status(404).json({ error: 'Source not found' });
+    const sid = src.recordset[0].id;
+    await query('DELETE FROM sanctions_entries_mem WHERE source_id = @sid', { sid });
+    res.json({ ok: true, message: `Cleared sanctions_entries_mem for ${sourceCode}` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/scraper/load-mem/:sourceCode
+// Copies active rows from sanctions_entries → sanctions_entries_mem for this source
+router.post('/load-mem/:sourceCode', async (req, res) => {
+  try {
+    const { sourceCode } = req.params;
+    const src = await query('SELECT id FROM sanctions_list_sources WHERE source_code = @code', { code: sourceCode });
+    if (!src.recordset.length) return res.status(404).json({ error: 'Source not found' });
+    const sid = src.recordset[0].id;
+
+    // Clear existing rows for this source first
+    await query('DELETE FROM sanctions_entries_mem WHERE source_id = @sid', { sid });
+
+    // Insert fresh copy from sanctions_entries
+    const result = await query(`
+      INSERT INTO sanctions_entries_mem
+        (id, source_id, source_code, external_id, entry_type, primary_name,
+         aliases, dob, nationality, programme, status, listing_date)
+      SELECT
+        e.id, e.source_id, s.source_code, e.external_id, e.entry_type, e.primary_name,
+        (
+          SELECT STRING_AGG(a.alias_name, '|')
+          FROM sanctions_aliases a
+          WHERE a.entry_id = e.id
+        ) AS aliases,
+        e.dob, e.nationality, e.programme, e.status,
+        CONVERT(NVARCHAR(30), e.listing_date, 23)
+      FROM sanctions_entries e
+      JOIN sanctions_list_sources s ON s.id = e.source_id
+      WHERE e.source_id = @sid
+        AND e.status IN ('Active', 'ACTIVE')
+    `, { sid });
+
+    const loaded = result.rowsAffected?.[0] ?? 0;
+    res.json({ ok: true, loaded, message: `Loaded ${loaded} rows into sanctions_entries_mem for ${sourceCode}` });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

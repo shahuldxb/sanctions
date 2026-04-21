@@ -9,6 +9,7 @@ const router  = express.Router();
 const {
   loadUnified,
   screenUnified,
+  screenUnifiedMem,
   screenUnifiedDB,
   getUnifiedStatus,
   reloadCategory,
@@ -73,22 +74,31 @@ router.post('/screen', async (req, res) => {
     }
 
     const t0 = Date.now();
-    // Try RAM index first; fall back to DB if index not loaded
-    let result = screenUnified(name.trim(), {
+    const opts = {
       threshold:    parseInt(threshold),
       maxResults:   parseInt(maxResults),
       filterSource,
       filterList,
-    });
-    if (!result) {
-      result = await screenUnifiedDB(name.trim(), {
-        threshold:  parseInt(threshold),
-        maxResults: parseInt(maxResults),
-      });
-    }
-    const durationMs = Date.now() - t0;
+    };
 
-    res.json({ ...result, durationMs, threshold });
+    // ── Tier 1: RAM index (fastest) ────────────────────────────────────────────
+    let result = screenUnified(name.trim(), opts);
+    let tier = 'ram';
+
+    // ── Tier 2: SQL in-memory table (sanctions_entries_mem) ───────────────────
+    if (!result) {
+      result = await screenUnifiedMem(name.trim(), opts);
+      tier = 'mem';
+    }
+
+    // ── Tier 3: Disk table (sanctions_entries) ──────────────────────────────
+    if (!result) {
+      result = await screenUnifiedDB(name.trim(), opts);
+      tier = 'disk';
+    }
+
+    const durationMs = Date.now() - t0;
+    res.json({ ...result, durationMs, threshold, searchTier: tier });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
