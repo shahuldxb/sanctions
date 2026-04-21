@@ -286,4 +286,67 @@ router.get('/source-stats/:source', async (req, res) => {
   }
 });
 
+// ── GET /api/pep/mem-status ── get pepMemLoader status ──────────────────────────────
+router.get('/mem-status', (req, res) => {
+  try {
+    const { getPEPMemStatus } = require('../services/pepMemLoader');
+    res.json(getPEPMemStatus());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/pep/clear-ram ── clear Node.js in-memory index ──────────────────────
+router.post('/clear-ram', (req, res) => {
+  try {
+    const { clearRAM } = require('../services/pepEngine');
+    const result = clearRAM();
+    res.json({ success: true, message: `RAM index cleared. ${result.cleared.toLocaleString()} entries removed.`, cleared: result.cleared });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/pep/clear-mem-table ── truncate pep_entries_mem SQL table ──────────────
+router.post('/clear-mem-table', async (req, res) => {
+  try {
+    const { getPool } = require('../db/connection');
+    const pool = await getPool();
+    // Count before truncate
+    const countRes = await pool.request().query('SELECT COUNT(*) as cnt FROM pep_entries_mem');
+    const before = countRes.recordset[0].cnt;
+    await pool.request().query('TRUNCATE TABLE pep_entries_mem');
+    res.json({ success: true, message: `In-memory table cleared. ${before.toLocaleString()} rows removed.`, cleared: before });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// ── POST /api/pep/load-ram ── rebuild full Node.js RAM index from DB ─────────────────
+router.post('/load-ram', (req, res) => {
+  try {
+    const { reloadPEPs, getPEPStatus } = require('../services/pepEngine');
+    const st = getPEPStatus();
+    if (st.isLoading) return res.status(409).json({ error: 'RAM index is already loading' });
+    reloadPEPs().catch(e => console.error('[PEPEngine] RAM reload error:', e.message));
+    res.json({ success: true, message: 'RAM index reload started. Poll /api/pep/stats for progress.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/pep/load-mem-table ── reload pep_entries_mem from pep_entries ─────────
+router.post('/load-mem-table', async (req, res) => {
+  try {
+    const { loadPEPIntoMemTable, getPEPMemStatus } = require('../services/pepMemLoader');
+    const st = getPEPMemStatus();
+    if (st.loading) return res.status(409).json({ error: 'In-memory table is already loading' });
+    loadPEPIntoMemTable(null, { forceReload: true }).catch(e => console.error('[MemLoader] Error:', e.message));
+    res.json({ success: true, message: 'In-memory table reload started. Poll /api/pep/stats for progress.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

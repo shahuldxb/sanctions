@@ -265,6 +265,10 @@ export default function PEPManager() {
   // Per-source RAM reload state
   const [ramReloading,   setRamReloading]   = useState<Record<string, boolean>>({})
   const [ramProgress,    setRamProgress]    = useState<Record<string, any>>({})
+  // Global reset controls state
+  const [memTableStatus, setMemTableStatus] = useState<any>(null)
+  const [resetMsg,       setResetMsg]       = useState<string | null>(null)
+  const [resetLoading,   setResetLoading]   = useState<string | null>(null)
 
   const fetchAll = useCallback(async () => {
     try {
@@ -280,6 +284,9 @@ export default function PEPManager() {
       if (bcpRes)   setBCPStatus(bcpRes)
       if (wdRes)    setWikidataStatus(wdRes)
       if (icijRes)  setICIJStatus(icijRes)
+      // Poll mem-table status
+      const memRes = await fetch(`${API}/pep/mem-status`).then(r => r.json()).catch(() => null)
+      if (memRes) setMemTableStatus(memRes)
     } catch (_) {}
   }, [])
 
@@ -364,6 +371,54 @@ export default function PEPManager() {
       setError(e.message)
       setRamReloading(prev => ({ ...prev, [source]: false }))
     }
+  }
+
+  // ── Reset control handlers ──────────────────────────────────────────────────
+  async function handleClearRAM() {
+    if (!window.confirm('Clear the Node.js RAM index? Screening will stop working until reloaded.')) return
+    setResetLoading('clear-ram'); setResetMsg(null)
+    try {
+      const r = await fetch(`${API}/pep/clear-ram`, { method: 'POST' })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.error)
+      setResetMsg(`✓ ${d.message}`)
+      fetchAll()
+    } catch (e: any) { setResetMsg(`✗ ${e.message}`) }
+    finally { setResetLoading(null) }
+  }
+  async function handleLoadRAM() {
+    setResetLoading('load-ram'); setResetMsg(null)
+    try {
+      const r = await fetch(`${API}/pep/load-ram`, { method: 'POST' })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.error)
+      setResetMsg(`✓ ${d.message}`)
+      fetchAll()
+    } catch (e: any) { setResetMsg(`✗ ${e.message}`) }
+    finally { setResetLoading(null) }
+  }
+  async function handleClearMemTable() {
+    if (!window.confirm('Truncate pep_entries_mem? The SQL in-memory table will be empty until reloaded.')) return
+    setResetLoading('clear-mem'); setResetMsg(null)
+    try {
+      const r = await fetch(`${API}/pep/clear-mem-table`, { method: 'POST' })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.error)
+      setResetMsg(`✓ ${d.message}`)
+      fetchAll()
+    } catch (e: any) { setResetMsg(`✗ ${e.message}`) }
+    finally { setResetLoading(null) }
+  }
+  async function handleLoadMemTable() {
+    setResetLoading('load-mem'); setResetMsg(null)
+    try {
+      const r = await fetch(`${API}/pep/load-mem-table`, { method: 'POST' })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.error)
+      setResetMsg(`✓ ${d.message}`)
+      fetchAll()
+    } catch (e: any) { setResetMsg(`✗ ${e.message}`) }
+    finally { setResetLoading(null) }
   }
 
   async function startWikidataLoad() {
@@ -567,6 +622,123 @@ export default function PEPManager() {
             <div className="text-xs text-slate-500 mt-0.5">{s.sub}</div>
           </div>
         ))}
+      </div>
+
+      {/* ── RESET CONTROLS ── */}
+      <div className="bg-slate-900 border border-slate-700 rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
+          <h2 className="text-white font-semibold text-sm flex items-center gap-2">
+            <RotateCcw size={14} className="text-amber-400" /> Index Controls
+            <span className="text-xs text-slate-500 font-normal">— clear or reload the RAM index and SQL in-memory table independently</span>
+          </h2>
+          {resetMsg && (
+            <span className={`text-xs px-2 py-1 rounded font-mono ${resetMsg.startsWith('✓') ? 'text-emerald-400 bg-emerald-950' : 'text-red-400 bg-red-950'}`}>
+              {resetMsg}
+            </span>
+          )}
+        </div>
+        <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+
+          {/* RAM Index card */}
+          <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 space-y-3">
+            <div className="flex items-center gap-2">
+              <Cpu size={16} className="text-violet-400" />
+              <div>
+                <div className="font-semibold text-white text-sm">Node.js RAM Index</div>
+                <div className="text-slate-400 text-xs">Token + Double Metaphone + Trigram — used by all screening queries</div>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="bg-slate-900 rounded-lg p-2">
+                <div className="text-slate-500 mb-0.5">Entries Loaded</div>
+                <div className={`font-bold font-mono ${stats?.totalInRAM ? 'text-violet-300' : 'text-amber-400'}`}>
+                  {fmtNum(stats?.totalInRAM ?? 0)}
+                </div>
+              </div>
+              <div className="bg-slate-900 rounded-lg p-2">
+                <div className="text-slate-500 mb-0.5">Status</div>
+                <div className={`font-bold text-xs ${stats?.isLoading ? 'text-cyan-400 animate-pulse' : stats?.totalInRAM ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {stats?.isLoading ? `● LOADING ${stats?.loadProgress?.pct ?? 0}%` : stats?.totalInRAM ? '● LOADED' : '○ EMPTY'}
+                </div>
+              </div>
+            </div>
+            {stats?.isLoading && (
+              <div className="space-y-1">
+                <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                  <div className="h-full rounded-full bg-gradient-to-r from-violet-600 to-cyan-500 transition-all duration-500"
+                    style={{ width: `${Math.max(stats?.loadProgress?.pct ?? 0, 1)}%` }} />
+                </div>
+                <div className="text-xs text-slate-500 font-mono">
+                  {(stats?.loadProgress?.loaded ?? 0).toLocaleString()} / {(stats?.loadProgress?.total ?? 0).toLocaleString()} rows
+                </div>
+              </div>
+            )}
+            <div className="flex gap-2 pt-1 border-t border-slate-700">
+              <button onClick={handleClearRAM} disabled={!!resetLoading || stats?.isLoading}
+                className="flex-1 flex items-center justify-center gap-1.5 text-xs py-2 px-3 rounded-lg font-medium bg-red-900 hover:bg-red-800 disabled:opacity-50 text-red-200 transition-colors cursor-pointer">
+                {resetLoading === 'clear-ram' ? <RefreshCw size={11} className="animate-spin" /> : <Square size={11} />}
+                Clear RAM
+              </button>
+              <button onClick={handleLoadRAM} disabled={!!resetLoading || stats?.isLoading}
+                className="flex-1 flex items-center justify-center gap-1.5 text-xs py-2 px-3 rounded-lg font-medium bg-violet-700 hover:bg-violet-600 disabled:opacity-50 text-white transition-colors cursor-pointer">
+                {resetLoading === 'load-ram' ? <RefreshCw size={11} className="animate-spin" /> : <Play size={11} />}
+                Load RAM
+              </button>
+            </div>
+          </div>
+
+          {/* In-Memory Table card */}
+          <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 space-y-3">
+            <div className="flex items-center gap-2">
+              <Server size={16} className="text-cyan-400" />
+              <div>
+                <div className="font-semibold text-white text-sm">SQL In-Memory Table</div>
+                <div className="text-slate-400 text-xs">pep_entries_mem — SQL Server OLTP in-memory table for fast SQL queries</div>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="bg-slate-900 rounded-lg p-2">
+                <div className="text-slate-500 mb-0.5">Rows in Table</div>
+                <div className={`font-bold font-mono ${stats?.totalInMemTable ? 'text-cyan-300' : 'text-amber-400'}`}>
+                  {fmtNum(stats?.totalInMemTable ?? 0)}
+                </div>
+              </div>
+              <div className="bg-slate-900 rounded-lg p-2">
+                <div className="text-slate-500 mb-0.5">Status</div>
+                <div className={`font-bold text-xs ${memTableStatus?.loading ? 'text-cyan-400 animate-pulse' : stats?.totalInMemTable ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {memTableStatus?.loading ? '● LOADING' : stats?.totalInMemTable ? '● LOADED' : '○ EMPTY'}
+                </div>
+              </div>
+            </div>
+            {memTableStatus?.loading && (
+              <div className="space-y-1">
+                <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                  <div className="h-full rounded-full bg-gradient-to-r from-cyan-600 to-blue-500 transition-all duration-500"
+                    style={{ width: `${Math.max(memTableStatus?.pct ?? 1, 1)}%` }} />
+                </div>
+                <div className="text-xs text-slate-500 font-mono">
+                  {(memTableStatus?.rowCount ?? 0).toLocaleString()} rows loaded
+                </div>
+              </div>
+            )}
+            {memTableStatus?.completedAt && !memTableStatus?.loading && (
+              <div className="text-xs text-slate-500">Last loaded: {toIST(memTableStatus.completedAt)}</div>
+            )}
+            <div className="flex gap-2 pt-1 border-t border-slate-700">
+              <button onClick={handleClearMemTable} disabled={!!resetLoading || memTableStatus?.loading}
+                className="flex-1 flex items-center justify-center gap-1.5 text-xs py-2 px-3 rounded-lg font-medium bg-red-900 hover:bg-red-800 disabled:opacity-50 text-red-200 transition-colors cursor-pointer">
+                {resetLoading === 'clear-mem' ? <RefreshCw size={11} className="animate-spin" /> : <Square size={11} />}
+                Clear Table
+              </button>
+              <button onClick={handleLoadMemTable} disabled={!!resetLoading || memTableStatus?.loading}
+                className="flex-1 flex items-center justify-center gap-1.5 text-xs py-2 px-3 rounded-lg font-medium bg-cyan-700 hover:bg-cyan-600 disabled:opacity-50 text-white transition-colors cursor-pointer">
+                {resetLoading === 'load-mem' ? <RefreshCw size={11} className="animate-spin" /> : <Play size={11} />}
+                Load Table
+              </button>
+            </div>
+          </div>
+
+        </div>
       </div>
 
       {/* ── OpenSanctions BCP Pipeline ── */}

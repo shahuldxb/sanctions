@@ -1,31 +1,21 @@
-import React, { useState } from 'react'
-import { screenSubject, screenPEP, aiAnalyze } from '../../api'
+import React, { useState, useEffect } from 'react'
+import { aiAnalyze } from '../../api'
 import { Badge, ScoreBar, Spinner } from '../../components/ui'
 import { SetPageHelp } from '../../components/HelpOverlay'
 import {
   Zap, AlertTriangle, CheckCircle, XCircle, Bot, Shield,
   Clock, Cpu, Database, User, Flag, Briefcase, Globe,
-  ChevronRight, Search, BarChart2, FileText, Activity
+  ChevronRight, Search, BarChart2, FileText, Activity,
+  AlertCircle, Info
 } from 'lucide-react'
 import toast from 'react-hot-toast'
-
-function parseEngineUsed(engineUsed: string) {
-  if (!engineUsed) return null
-  const msMatch        = engineUsed.match(/(\d+)ms/)
-  const candidateMatch = engineUsed.match(/(\d+)\/(\d+)\s+candidates/)
-  return {
-    ms:         msMatch        ? parseInt(msMatch[1])        : null,
-    candidates: candidateMatch ? parseInt(candidateMatch[1]) : null,
-    total:      candidateMatch ? parseInt(candidateMatch[2]) : null,
-    isRAM:      engineUsed.includes('IN_MEMORY'),
-  }
-}
+import axios from 'axios'
 
 const PAGE_META = {
   title: 'Master Screener',
   entities: [{
     name: 'Master Screener',
-    description: 'Single search against all sanctions lists AND the PEP database simultaneously.',
+    description: 'Single search against all sanctions lists AND the PEP database simultaneously via unified RAM index.',
     fields: [
       { name: 'name', type: 'varchar', description: 'Subject name to screen', required: true },
       { name: 'entity_type', type: 'enum', description: 'INDIVIDUAL | ENTITY | VESSEL | AIRCRAFT' },
@@ -37,237 +27,144 @@ const PAGE_META = {
   }]
 }
 
+// ── List type badge colours ───────────────────────────────────────────────────
+const LIST_BADGE: Record<string, { bg: string; text: string; border: string; label: string }> = {
+  OFAC:               { bg: 'bg-red-900/30',    text: 'text-red-300',    border: 'border-red-800/40',    label: 'OFAC' },
+  UN:                 { bg: 'bg-orange-900/30',  text: 'text-orange-300', border: 'border-orange-800/40', label: 'UN' },
+  EU:                 { bg: 'bg-blue-900/30',    text: 'text-blue-300',   border: 'border-blue-800/40',   label: 'EU' },
+  UK:                 { bg: 'bg-indigo-900/30',  text: 'text-indigo-300', border: 'border-indigo-800/40', label: 'UK' },
+  SECO:               { bg: 'bg-sky-900/30',     text: 'text-sky-300',    border: 'border-sky-800/40',    label: 'SECO' },
+  DFAT:               { bg: 'bg-teal-900/30',    text: 'text-teal-300',   border: 'border-teal-800/40',   label: 'DFAT' },
+  MAS:                { bg: 'bg-cyan-900/30',    text: 'text-cyan-300',   border: 'border-cyan-800/40',   label: 'MAS' },
+  BIS:                { bg: 'bg-violet-900/30',  text: 'text-violet-300', border: 'border-violet-800/40', label: 'BIS' },
+  OPENSANCTIONS_PEP:  { bg: 'bg-purple-900/30',  text: 'text-purple-300', border: 'border-purple-800/40', label: 'OpenSanctions' },
+  WIKIDATA:           { bg: 'bg-emerald-900/30', text: 'text-emerald-300',border: 'border-emerald-800/40',label: 'Wikidata' },
+  ICIJ:               { bg: 'bg-amber-900/30',   text: 'text-amber-300',  border: 'border-amber-800/40',  label: 'ICIJ' },
+}
+
+function ListBadge({ code }: { code: string }) {
+  const cfg = LIST_BADGE[code] || { bg: 'bg-slate-700/60', text: 'text-slate-300', border: 'border-slate-600', label: code }
+  return (
+    <span className={`text-xs font-mono font-bold px-2 py-0.5 rounded border ${cfg.bg} ${cfg.text} ${cfg.border}`}>
+      {cfg.label}
+    </span>
+  )
+}
+
+function CategoryBadge({ category }: { category: string }) {
+  if (category === 'PEP') return (
+    <span className="text-xs font-semibold px-2 py-0.5 rounded bg-purple-900/20 text-purple-400 border border-purple-800/30">PEP</span>
+  )
+  return (
+    <span className="text-xs font-semibold px-2 py-0.5 rounded bg-blue-900/20 text-blue-400 border border-blue-800/30">SANCTIONS</span>
+  )
+}
+
 // ── Verdict pill ──────────────────────────────────────────────────────────────
-function VerdictPill({ overall }: { overall: string }) {
-  const isBlocked = overall === 'BLOCKED' || overall === 'HIT'
-  const isReview  = overall === 'POTENTIAL_MATCH' || overall === 'POSSIBLE_MATCH' || overall === 'REVIEW'
-  if (isBlocked) return (
+function VerdictPill({ score }: { score: number }) {
+  if (score >= 90) return (
     <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-red-500/15 border border-red-500/40 text-red-400 text-sm font-bold tracking-wide">
       <XCircle size={14} /> BLOCKED
     </span>
   )
-  if (isReview) return (
+  if (score >= 70) return (
     <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/15 border border-amber-500/40 text-amber-400 text-sm font-bold tracking-wide">
       <AlertTriangle size={14} /> REVIEW
     </span>
   )
   return (
-    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/40 text-emerald-400 text-sm font-bold tracking-wide">
-      <CheckCircle size={14} /> CLEAR
+    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-yellow-500/15 border border-yellow-500/40 text-yellow-400 text-sm font-bold tracking-wide">
+      <Info size={14} /> POSSIBLE
     </span>
   )
 }
 
-// ── Result summary card ───────────────────────────────────────────────────────
-function ResultSummaryCard({ label, overall, matchCount, topScore, engineInfo, icon: Icon, accentClass, onClick, active, hitLists }: any) {
-  const isBlocked = overall === 'BLOCKED' || overall === 'HIT'
-  const isReview  = overall === 'POTENTIAL_MATCH' || overall === 'POSSIBLE_MATCH' || overall === 'REVIEW'
-  const isClear   = !isBlocked && !isReview
-
-  const leftBorder = isBlocked ? 'border-l-red-500' : isReview ? 'border-l-amber-500' : 'border-l-emerald-500'
-  const activeBg   = active ? 'bg-slate-700/40' : 'bg-slate-800/30 hover:bg-slate-700/30'
-
-  return (
-    <button
-      onClick={onClick}
-      className={`w-full text-left rounded-xl border border-slate-700/60 border-l-4 ${leftBorder} ${activeBg} p-4 transition-all duration-150 cursor-pointer`}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-center gap-2.5">
-          <div className={`p-2 rounded-lg ${accentClass}`}>
-            <Icon size={16} />
-          </div>
-          <div>
-            <div className="text-xs text-slate-400 uppercase tracking-widest font-medium">{label}</div>
-            <div className="mt-1"><VerdictPill overall={overall} /></div>
-          </div>
-        </div>
-        <div className="text-right shrink-0">
-          {engineInfo?.ms !== null && engineInfo?.ms !== undefined && (
-            <div className="flex items-center gap-1 justify-end text-cyan-400">
-              <Clock size={11} />
-              <span className="text-base font-mono font-bold">{engineInfo.ms}</span>
-              <span className="text-xs text-cyan-600">ms</span>
-            </div>
-          )}
-          {engineInfo?.isRAM && (
-            <div className="flex items-center gap-1 justify-end mt-0.5">
-              <Cpu size={9} className="text-slate-500" />
-              <span className="text-xs text-slate-500">RAM engine</span>
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="mt-3 flex items-center gap-4 text-sm">
-        <div>
-          <span className={`text-xl font-bold ${isBlocked ? 'text-red-400' : isReview ? 'text-amber-400' : 'text-emerald-400'}`}>
-            {matchCount}
-          </span>
-          <span className="text-slate-500 text-xs ml-1">match{matchCount !== 1 ? 'es' : ''}</span>
-        </div>
-        {topScore > 0 && (
-          <div>
-            <span className={`text-xl font-bold ${topScore >= 90 ? 'text-red-400' : topScore >= 70 ? 'text-amber-400' : 'text-yellow-400'}`}>
-              {topScore}%
-            </span>
-            <span className="text-slate-500 text-xs ml-1">top score</span>
-          </div>
-        )}
-        {engineInfo?.candidates !== null && engineInfo?.candidates !== undefined && (
-          <div className="ml-auto flex items-center gap-1 text-slate-500">
-            <Database size={10} />
-            <span className="text-xs">{engineInfo.candidates?.toLocaleString()} / {engineInfo.total?.toLocaleString()}</span>
-          </div>
-        )}
-      </div>
-
-      {/* Hit list badges */}
-      {hitLists && hitLists.length > 0 && (
-        <div className="mt-2.5 flex flex-wrap gap-1">
-          {hitLists.map((list: string) => (
-            <span
-              key={list}
-              className={`text-xs px-2 py-0.5 rounded font-mono font-semibold border ${
-                isBlocked ? 'bg-red-500/10 border-red-500/30 text-red-300' :
-                isReview  ? 'bg-amber-500/10 border-amber-500/30 text-amber-300' :
-                            'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-              }`}
-            >
-              {list}
-            </span>
-          ))}
-        </div>
-      )}
-
-      {active && (
-        <div className="mt-2 flex items-center gap-1 text-xs text-slate-400">
-          <ChevronRight size={12} />
-          <span>Viewing details below</span>
-        </div>
-      )}
-    </button>
-  )
-}
-
-// ── Match row ─────────────────────────────────────────────────────────────────
-function SanctionMatchRow({ m, index }: { m: any; index: number }) {
-  const score = m.score ?? m.match_score ?? 0
+// ── Unified match row ─────────────────────────────────────────────────────────
+function UnifiedMatchRow({ m, index }: { m: any; index: number }) {
+  const score      = m.score ?? 0
   const scoreColor = score >= 90 ? 'text-red-400' : score >= 70 ? 'text-amber-400' : 'text-yellow-400'
   const scoreBg    = score >= 90 ? 'bg-red-500/10 border-red-500/20' : score >= 70 ? 'bg-amber-500/10 border-amber-500/20' : 'bg-yellow-500/10 border-yellow-500/20'
+  const [expanded, setExpanded] = useState(false)
 
   return (
-    <div className="flex items-start gap-4 py-3.5 border-b border-slate-800/80 last:border-0">
-      {/* Index */}
-      <div className="w-6 h-6 rounded-full bg-slate-800 flex items-center justify-center text-xs text-slate-500 shrink-0 mt-0.5">
-        {index + 1}
-      </div>
-
-      {/* Main info */}
-      <div className="flex-1 min-w-0">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="font-semibold text-white text-sm">{m.primary_name || m.name}</div>
-            <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
-              <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-blue-900/30 text-blue-300 border border-blue-800/40">
-                {m.list_source || m.source_code}
-              </span>
-              {m.list_name && (
-                <span className="text-xs text-slate-400 truncate max-w-[200px]">{m.list_name}</span>
-              )}
-              {m.match_type && (
-                <span className="text-xs px-1.5 py-0.5 rounded bg-slate-700/60 text-slate-400 border border-slate-700">
-                  {m.match_type}
-                </span>
-              )}
-              {m.nationality && (
-                <span className="flex items-center gap-1 text-xs text-slate-500">
-                  <Globe size={9} />{m.nationality}
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* Score badge */}
-          <div className={`shrink-0 px-3 py-1.5 rounded-lg border text-center ${scoreBg}`}>
-            <div className={`text-lg font-bold font-mono ${scoreColor}`}>{score}%</div>
-            <div className="text-xs text-slate-500 -mt-0.5">match</div>
-          </div>
+    <div className="border-b border-slate-800/80 last:border-0">
+      <div
+        className="flex items-start gap-4 py-3.5 cursor-pointer hover:bg-slate-800/20 px-1 rounded transition-colors"
+        onClick={() => setExpanded(v => !v)}
+      >
+        {/* Index */}
+        <div className="w-6 h-6 rounded-full bg-slate-800 flex items-center justify-center text-xs text-slate-500 shrink-0 mt-0.5">
+          {index + 1}
         </div>
 
-        {/* Score bar */}
-        <div className="mt-2">
-          <ScoreBar score={score} />
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function PEPMatchRow({ m, index }: { m: any; index: number }) {
-  const score = m.score ?? 0
-  const scoreColor = score >= 90 ? 'text-red-400' : score >= 70 ? 'text-amber-400' : 'text-yellow-400'
-  const scoreBg    = score >= 90 ? 'bg-red-500/10 border-red-500/20' : score >= 70 ? 'bg-amber-500/10 border-amber-500/20' : 'bg-yellow-500/10 border-yellow-500/20'
-
-  return (
-    <div className="flex items-start gap-4 py-3.5 border-b border-slate-800/80 last:border-0">
-      <div className="w-6 h-6 rounded-full bg-slate-800 flex items-center justify-center text-xs text-slate-500 shrink-0 mt-0.5">
-        {index + 1}
-      </div>
-
-      <div className="flex-1 min-w-0">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="font-semibold text-white text-sm">{m.name}</div>
-            {m.matchedOn && m.matchedOn !== m.name && (
-              <div className="text-xs text-slate-500 mt-0.5">
-                Alias match: <span className="text-slate-300 italic">"{m.matchedOn}"</span>
+        {/* Main info */}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="font-semibold text-white text-sm">{m.primary_name}</div>
+              {m.matchedName && m.matchedName !== m.primary_name && (
+                <div className="text-xs text-slate-500 mt-0.5">
+                  Matched via alias: <span className="text-slate-300 italic">"{m.matchedName}"</span>
+                </div>
+              )}
+              <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                <CategoryBadge category={m.list_category} />
+                <ListBadge code={m.source_code} />
+                {m.position && (
+                  <span className="flex items-center gap-1 text-xs text-slate-400 max-w-[200px] truncate">
+                    <Briefcase size={9} />{m.position}
+                  </span>
+                )}
+                {m.nationality && (
+                  <span className="flex items-center gap-1 text-xs text-slate-500">
+                    <Globe size={9} />{m.nationality}
+                  </span>
+                )}
+                {m.birth_date && (
+                  <span className="text-xs text-slate-500">b. {m.birth_date}</span>
+                )}
               </div>
-            )}
-            <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
-              {m.source && (
-                <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-purple-900/30 text-purple-300 border border-purple-800/40">
-                  {m.source}
-                </span>
-              )}
-              {m.position && (
-                <span className="flex items-center gap-1 text-xs text-slate-400">
-                  <Briefcase size={9} />{m.position}
-                </span>
-              )}
-              {m.countries && (
-                <span className="flex items-center gap-1 text-xs text-slate-400">
-                  <Flag size={9} />{m.countries}
-                </span>
-              )}
-              {m.birthDate && (
-                <span className="flex items-center gap-1 text-xs text-slate-500">
-                  <User size={9} />DOB: {m.birthDate}
-                </span>
-              )}
             </div>
-            {m.party && (
-              <div className="text-xs text-slate-500 mt-1">Party: <span className="text-slate-300">{m.party}</span></div>
-            )}
+
+            {/* Score badge */}
+            <div className={`shrink-0 px-3 py-1.5 rounded-lg border text-center ${scoreBg}`}>
+              <div className={`text-lg font-bold font-mono ${scoreColor}`}>{score}%</div>
+              <div className="text-xs text-slate-500 -mt-0.5">match</div>
+            </div>
           </div>
 
-          <div className={`shrink-0 px-3 py-1.5 rounded-lg border text-center ${scoreBg}`}>
-            <div className={`text-lg font-bold font-mono ${scoreColor}`}>{score}%</div>
-            <div className="text-xs text-slate-500 -mt-0.5">match</div>
+          {/* Score bar */}
+          <div className="mt-2">
+            <ScoreBar score={score} />
           </div>
         </div>
 
-        <div className="mt-2">
-          <ScoreBar score={score} />
-        </div>
+        <ChevronRight size={14} className={`text-slate-600 shrink-0 mt-1 transition-transform ${expanded ? 'rotate-90' : ''}`} />
       </div>
+
+      {/* Expanded detail */}
+      {expanded && (
+        <div className="ml-10 mb-3 p-3 rounded-lg bg-slate-900/40 border border-slate-700/40 text-xs space-y-1.5">
+          {m.countries && <div><span className="text-slate-500">Countries:</span> <span className="text-slate-300">{m.countries}</span></div>}
+          {m.dataset && <div><span className="text-slate-500">Dataset:</span> <span className="text-slate-300">{m.dataset}</span></div>}
+          {m.political_party && <div><span className="text-slate-500">Party:</span> <span className="text-slate-300">{m.political_party}</span></div>}
+          {m.adverse_links && <div><span className="text-slate-500">Adverse Links:</span> <span className="text-amber-300">{m.adverse_links}</span></div>}
+          {m.wikidata_id && <div><span className="text-slate-500">Wikidata ID:</span> <span className="text-slate-300">{m.wikidata_id}</span></div>}
+          {m.icij_node_id && <div><span className="text-slate-500">ICIJ Node:</span> <span className="text-slate-300">{m.icij_node_id}</span></div>}
+          {m.listing_date && <div><span className="text-slate-500">Listed:</span> <span className="text-slate-300">{m.listing_date}</span></div>}
+          {m.status && <div><span className="text-slate-500">Status:</span> <span className={m.status === 'ACTIVE' ? 'text-red-400' : 'text-slate-400'}>{m.status}</span></div>}
+          {m.aliases && <div><span className="text-slate-500">Aliases:</span> <span className="text-slate-300">{m.aliases.replace(/\|/g, ' · ')}</span></div>}
+          <div><span className="text-slate-500">Source:</span> <span className="text-slate-300">{m.source_name || m.source_code}</span></div>
+          <div><span className="text-slate-500">External ID:</span> <span className="text-slate-400 font-mono">{m.external_id}</span></div>
+        </div>
+      )}
     </div>
   )
 }
 
-// ── Lower confidence matches group (collapsible) ────────────────────────────
+// ── Lower confidence group ────────────────────────────────────────────────────
 function LowerMatchesGroup({ matches, threshold }: { matches: any[]; threshold: number }) {
-  const [expanded, setExpanded] = React.useState(false)
+  const [expanded, setExpanded] = useState(false)
   return (
     <div className="mt-2">
       <button
@@ -281,11 +178,62 @@ function LowerMatchesGroup({ matches, threshold }: { matches: any[]; threshold: 
       {expanded && (
         <div className="border border-slate-700/40 rounded-lg overflow-hidden mb-2">
           <div className="px-3 py-2 bg-amber-900/10 border-b border-slate-700/40">
-            <p className="text-xs text-amber-400/70">These entries share name tokens with the subject but are likely different individuals. Review carefully before taking action.</p>
+            <p className="text-xs text-amber-400/70">These entries share name tokens but may be different individuals. Review carefully.</p>
           </div>
-          {matches.map((m: any, i: number) => <SanctionMatchRow key={i} m={m} index={i} />)}
+          {matches.map((m: any, i: number) => <UnifiedMatchRow key={i} m={m} index={i} />)}
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Engine status bar ─────────────────────────────────────────────────────────
+function EngineStatusBar() {
+  const [status, setStatus] = useState<any>(null)
+  useEffect(() => {
+    axios.get('/api/unified/status').then(r => setStatus(r.data)).catch(() => {})
+    const t = setInterval(() => {
+      axios.get('/api/unified/status').then(r => setStatus(r.data)).catch(() => {})
+    }, 5000)
+    return () => clearInterval(t)
+  }, [])
+
+  if (!status) return null
+
+  const pct = status.loadProgress?.pct ?? 0
+  const isLoading = status.isLoading
+
+  if (isLoading) return (
+    <div className="rounded-lg border border-blue-500/30 bg-blue-900/10 px-4 py-2.5 flex items-center gap-3 mb-4">
+      <Cpu size={14} className="text-blue-400 animate-pulse shrink-0" />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center justify-between text-xs mb-1">
+          <span className="text-blue-300 font-medium">Loading unified index…</span>
+          <span className="text-blue-400 font-mono">{pct}%</span>
+        </div>
+        <div className="h-1.5 rounded-full bg-slate-700/60 overflow-hidden">
+          <div className="h-full rounded-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-500" style={{ width: `${pct}%` }} />
+        </div>
+      </div>
+    </div>
+  )
+
+  if (!status.indexReady) return (
+    <div className="rounded-lg border border-amber-500/30 bg-amber-900/10 px-4 py-2.5 flex items-center gap-3 mb-4">
+      <AlertCircle size={14} className="text-amber-400 shrink-0" />
+      <span className="text-xs text-amber-300">Unified index not loaded — screening will use DB fallback</span>
+    </div>
+  )
+
+  return (
+    <div className="rounded-lg border border-emerald-500/20 bg-emerald-900/10 px-4 py-2 flex items-center gap-3 mb-4">
+      <Cpu size={12} className="text-emerald-400 shrink-0" />
+      <span className="text-xs text-emerald-300 font-medium">
+        Unified RAM index ready — {status.totalInRAM?.toLocaleString()} entries ({status.tokenCount?.toLocaleString()} tokens)
+      </span>
+      <span className="ml-auto text-xs text-slate-500">
+        {status.lastLoaded ? `Last loaded ${new Date(status.lastLoaded).toLocaleTimeString()}` : ''}
+      </span>
     </div>
   )
 }
@@ -295,116 +243,102 @@ export default function ScreeningQuick() {
   const [form, setForm] = useState({
     name: '', entity_type: 'INDIVIDUAL', dob: '', nationality: '', id_number: '', threshold: 60
   })
-  const [sanctionResult, setSanctionResult] = useState<any>(null)
-  const [pepResult,      setPepResult]      = useState<any>(null)
-  const [loading,        setLoading]        = useState(false)
-  const [aiLoading,      setAiLoading]      = useState(false)
-  const [aiResult,       setAiResult]       = useState<any>(null)
-  const [activePanel,    setActivePanel]    = useState<'sanctions' | 'pep' | 'ai'>('sanctions')
+  const [result,      setResult]      = useState<any>(null)
+  const [loading,     setLoading]     = useState(false)
+  const [aiLoading,   setAiLoading]   = useState(false)
+  const [aiResult,    setAiResult]    = useState<any>(null)
+  const [activePanel, setActivePanel] = useState<'all' | 'sanctions' | 'pep' | 'ai'>('all')
 
   const screen = async () => {
     if (!form.name.trim()) { toast.error('Please enter a name'); return }
     setLoading(true)
-    setSanctionResult(null)
-    setPepResult(null)
+    setResult(null)
     setAiResult(null)
-    setActivePanel('sanctions')
+    setActivePanel('all')
 
-    const [sanctionRes, pepRes] = await Promise.allSettled([
-      screenSubject({
-        subjects: [{ subject_name: form.name, subject_type: form.entity_type, dob: form.dob, nationality: form.nationality, id_number: form.id_number }],
-        source_system: 'MASTER_SCREENER',
-        requested_by: 'Compliance Officer',
-        threshold: form.threshold
-      }),
-      screenPEP({ name: form.name, threshold: form.threshold, maxResults: 20 })
-    ])
-
-    if (sanctionRes.status === 'fulfilled') {
-      const raw      = sanctionRes.value.data
-      const subject0 = raw.results?.[0] || {}
-      const matchList = subject0.matchList || subject0.matches || []
-      const hitLists = Array.from(new Set(
-        matchList
-          .filter((m: any) => (m.primary_name || m.name || '').length <= 80)
-          .map((m: any) => m.list_source || m.source_code || '')
-          .filter(Boolean)
-      )) as string[]
-      setSanctionResult({
-        ...raw,
-        overallResult: subject0.result || raw.overallResult || 'CLEAR',
-        matches:    matchList,
-        topScore:   subject0.score      || 0,
-        engineUsed: subject0.engineUsed || '',
-        engineInfo: parseEngineUsed(subject0.engineUsed || ''),
-        hitLists,
+    try {
+      const res = await axios.post('/api/unified/screen', {
+        name:      form.name.trim(),
+        threshold: form.threshold,
+        maxResults: 50,
       })
-    } else {
-      toast.error('Sanctions screening failed')
+      setResult(res.data)
+
+      const hits = res.data.results || []
+      const topScore = hits[0]?.score ?? 0
+      const hasBlocked = hits.some((m: any) => m.score >= 90)
+      const hasReview  = hits.some((m: any) => m.score >= 70 && m.score < 90)
+
+      if (hasBlocked) toast.error(`⛔ ${hits.filter((m:any)=>m.score>=90).length} BLOCKED match(es) found!`)
+      else if (hasReview) toast(`⚠️ Review required — ${hits.filter((m:any)=>m.score>=70).length} possible match(es)`, { icon: '⚠️' })
+      else toast.success('✓ Clear across all lists and PEP database')
+    } catch (e: any) {
+      toast.error('Screening failed: ' + (e.response?.data?.error || e.message))
+    } finally {
+      setLoading(false)
     }
-
-    if (pepRes.status === 'fulfilled') {
-      setPepResult(pepRes.value.data)
-    } else {
-      toast.error('PEP screening failed')
-    }
-
-    const sOverall = sanctionRes.status === 'fulfilled' ? sanctionRes.value.data?.results?.[0]?.result || sanctionRes.value.data?.overallResult : null
-    const pOverall = pepRes.status === 'fulfilled' ? pepRes.value.data?.result : null
-    if (sOverall === 'BLOCKED' || pOverall === 'HIT') toast.error('⛔ BLOCKED / HIT detected!')
-    else if (sOverall === 'POTENTIAL_MATCH' || pOverall === 'POSSIBLE_MATCH') toast('⚠️ Review required', { icon: '⚠️' })
-    else toast.success('✓ Clear on all lists')
-
-    setLoading(false)
   }
 
   const runAI = async () => {
-    if (!sanctionResult && !pepResult) return
+    if (!result?.results?.length) return
     setAiLoading(true)
     setActivePanel('ai')
     try {
-      const allMatches = [
-        ...(sanctionResult?.matches || []).map((m: any) => ({ ...m, _list: 'SANCTIONS' })),
-        ...(pepResult?.matches || []).map((m: any) => ({ name: m.name, match_score: m.score, source_code: m.source, _list: 'PEP', position: m.position })),
-      ]
-      const r = await aiAnalyze({ subject_name: form.name, subject_type: form.entity_type, context: 'Master Screener (Sanctions + PEP)', matches: allMatches })
+      const allMatches = (result.results || []).map((m: any) => ({
+        primary_name: m.primary_name,
+        match_score: m.score,
+        source_code: m.source_code,
+        list_category: m.list_category,
+        position: m.position,
+        nationality: m.nationality,
+      }))
+      const r = await aiAnalyze({
+        subject_name: form.name,
+        subject_type: form.entity_type,
+        context: 'Master Screener (Unified — Sanctions + PEP)',
+        matches: allMatches
+      })
       setAiResult(r.data.analysis)
     } catch (e: any) { toast.error(e.message) }
     finally { setAiLoading(false) }
   }
 
-  // Filter out description-text entries (primary_name > 80 chars are descriptions, not names)
-  const allSanctionMatches = (sanctionResult?.matches || []) as any[]
-  const sanctionMatches = allSanctionMatches.filter((m: any) => (m.primary_name || m.name || '').length <= 80)
-  const pepMatches      = (pepResult?.matches || []) as any[]
-  const hasResults      = sanctionResult || pepResult
+  const allMatches     = (result?.results || []) as any[]
+  const sanctionHits   = allMatches.filter((m: any) => m.list_category === 'SANCTIONS')
+  const pepHits        = allMatches.filter((m: any) => m.list_category === 'PEP')
+  const confirmedHits  = allMatches.filter((m: any) => m.score >= 90)
+  const reviewHits     = allMatches.filter((m: any) => m.score >= 70 && m.score < 90)
+  const possibleHits   = allMatches.filter((m: any) => m.score < 70)
+  const hasResults     = result !== null
+  const topScore       = allMatches[0]?.score ?? 0
 
-  // Group sanctions matches: confirmed (≥90%) vs lower confidence (70-89%)
-  const confirmedMatches = sanctionMatches.filter((m: any) => (m.score ?? m.match_score ?? 0) >= 90)
-  const lowerMatches     = sanctionMatches.filter((m: any) => (m.score ?? m.match_score ?? 0) < 90)
+  const displayMatches = activePanel === 'all'       ? allMatches
+                       : activePanel === 'sanctions'  ? sanctionHits
+                       : activePanel === 'pep'        ? pepHits
+                       : []
 
-  // Use pre-computed hitLists stored in state (computed at API call time)
-  const sanctionHitLists = (sanctionResult?.hitLists || []) as string[]
-  const pepHitLists = Array.from(new Set(
-    pepMatches.map((m: any) => m.source || m.dataset || '').filter(Boolean)
-  )) as string[]
+  const displayConfirmed = displayMatches.filter((m: any) => m.score >= 90)
+  const displayLower     = displayMatches.filter((m: any) => m.score < 90)
 
   return (
     <div className="space-y-0">
       <SetPageHelp meta={PAGE_META} />
 
       {/* ── Page header ── */}
-      <div className="mb-6">
+      <div className="mb-4">
         <div className="flex items-center gap-3 mb-1">
           <div className="p-2 rounded-lg bg-blue-500/10 border border-blue-500/20">
             <Zap size={18} className="text-blue-400" />
           </div>
           <div>
             <h1 className="text-xl font-bold text-white">Master Screener</h1>
-            <p className="text-sm text-slate-400">Simultaneous screening across all sanctions lists and PEP database</p>
+            <p className="text-sm text-slate-400">Unified screening across all sanctions lists and PEP database via single RAM index</p>
           </div>
         </div>
       </div>
+
+      {/* Engine status */}
+      <EngineStatusBar />
 
       <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-6 items-start">
 
@@ -580,44 +514,28 @@ export default function ScreeningQuick() {
 
           {hasResults && !loading && (
             <>
-              {/* ── Summary row ── */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {sanctionResult && (
-                  <ResultSummaryCard
-                    label="Sanctions Lists"
-                    overall={sanctionResult.overallResult}
-                    matchCount={sanctionMatches.length}
-                    topScore={sanctionResult.topScore}
-                    engineInfo={sanctionResult.engineInfo}
-                    icon={Shield}
-                    accentClass="bg-blue-500/10 text-blue-400"
-                    onClick={() => setActivePanel('sanctions')}
-                    active={activePanel === 'sanctions'}
-                    hitLists={sanctionHitLists}
-                  />
-                )}
-                {pepResult && (
-                  <ResultSummaryCard
-                    label="PEP Database"
-                    overall={pepResult.result}
-                    matchCount={pepMatches.length}
-                    topScore={pepResult.topScore}
-                    engineInfo={{ ms: pepResult.durationMs, isRAM: true, candidates: null, total: pepResult.totalPEPs }}
-                    icon={User}
-                    accentClass="bg-purple-500/10 text-purple-400"
-                    onClick={() => setActivePanel('pep')}
-                    active={activePanel === 'pep'}
-                    hitLists={pepHitLists}
-                  />
-                )}
+              {/* ── Summary stats row ── */}
+              <div className="grid grid-cols-4 gap-3">
+                {[
+                  { label: 'Total Matches', value: allMatches.length, color: 'text-white' },
+                  { label: 'Blocked (≥90%)', value: confirmedHits.length, color: confirmedHits.length > 0 ? 'text-red-400' : 'text-emerald-400' },
+                  { label: 'Review (70–89%)', value: reviewHits.length, color: reviewHits.length > 0 ? 'text-amber-400' : 'text-slate-400' },
+                  { label: 'Screened in', value: result?.durationMs ? `${result.durationMs}ms` : '—', color: 'text-cyan-400' },
+                ].map(s => (
+                  <div key={s.label} className="rounded-xl border border-slate-700/60 bg-slate-800/30 p-3 text-center">
+                    <div className={`text-2xl font-bold font-mono ${s.color}`}>{s.value}</div>
+                    <div className="text-xs text-slate-500 mt-0.5">{s.label}</div>
+                  </div>
+                ))}
               </div>
 
               {/* ── Tab bar ── */}
               <div className="flex items-center gap-1 bg-slate-800/40 rounded-lg p-1 border border-slate-700/40">
                 {[
-                  { id: 'sanctions', label: `Sanctions`, count: sanctionMatches.length, icon: Shield },
-                  { id: 'pep',       label: `PEP`,       count: pepMatches.length,      icon: User },
-                  { id: 'ai',        label: 'AI Analysis', count: null,                 icon: Bot },
+                  { id: 'all',       label: 'All Results',  count: allMatches.length,    icon: Activity },
+                  { id: 'sanctions', label: 'Sanctions',    count: sanctionHits.length,  icon: Shield },
+                  { id: 'pep',       label: 'PEP',          count: pepHits.length,       icon: User },
+                  { id: 'ai',        label: 'AI Analysis',  count: null,                 icon: Bot },
                 ].map(tab => (
                   <button
                     key={tab.id}
@@ -641,66 +559,43 @@ export default function ScreeningQuick() {
                 ))}
               </div>
 
-              {/* ── Sanctions detail ── */}
-              {activePanel === 'sanctions' && (
+              {/* ── Match list ── */}
+              {activePanel !== 'ai' && (
                 <div className="rounded-xl border border-slate-700/60 bg-slate-800/20 overflow-hidden">
                   <div className="px-4 py-3 border-b border-slate-700/60 flex items-center gap-2.5">
-                    <Shield size={14} className="text-blue-400" />
-                    <span className="text-sm font-semibold text-white">Sanctions Matches</span>
-                    {sanctionMatches.length > 0 && (
-                      <span className="ml-auto text-xs text-slate-500">
-                        {sanctionMatches.length} result{sanctionMatches.length !== 1 ? 's' : ''} · sorted by score
-                      </span>
-                    )}
+                    {activePanel === 'all'       && <Activity size={14} className="text-blue-400" />}
+                    {activePanel === 'sanctions' && <Shield size={14} className="text-blue-400" />}
+                    {activePanel === 'pep'       && <User size={14} className="text-purple-400" />}
+                    <span className="text-sm font-semibold text-white">
+                      {activePanel === 'all' ? 'All Matches' : activePanel === 'sanctions' ? 'Sanctions Matches' : 'PEP Matches'}
+                    </span>
+                    <span className="ml-auto text-xs text-slate-500">
+                      {displayMatches.length} result{displayMatches.length !== 1 ? 's' : ''} · sorted by score
+                    </span>
                   </div>
-                  {sanctionMatches.length === 0 ? (
+
+                  {displayMatches.length === 0 ? (
                     <div className="py-12 text-center">
                       <CheckCircle size={28} className="text-emerald-500 mx-auto mb-2.5" />
-                      <p className="text-slate-300 font-medium">No sanctions matches found</p>
-                      <p className="text-slate-500 text-sm mt-1">Subject is not on any monitored sanctions list above the {form.threshold}% threshold</p>
+                      <p className="text-slate-300 font-medium">No matches found</p>
+                      <p className="text-slate-500 text-sm mt-1">Subject is not on any monitored list above the {form.threshold}% threshold</p>
                     </div>
                   ) : (
                     <div className="px-4">
                       {/* Confirmed high-confidence matches */}
-                      {confirmedMatches.length > 0 && (
+                      {displayConfirmed.length > 0 && (
                         <>
                           <div className="py-2 text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-2">
                             <span className="w-2 h-2 rounded-full bg-red-500 inline-block"></span>
-                            Confirmed Matches ({confirmedMatches.length})
+                            Confirmed Matches — ≥90% ({displayConfirmed.length})
                           </div>
-                          {confirmedMatches.map((m: any, i: number) => <SanctionMatchRow key={i} m={m} index={i} />)}
+                          {displayConfirmed.map((m: any, i: number) => <UnifiedMatchRow key={i} m={m} index={i} />)}
                         </>
                       )}
-                      {/* Lower confidence matches — collapsed by default */}
-                      {lowerMatches.length > 0 && (
-                        <LowerMatchesGroup matches={lowerMatches} threshold={form.threshold} />
+                      {/* Lower confidence matches */}
+                      {displayLower.length > 0 && (
+                        <LowerMatchesGroup matches={displayLower} threshold={form.threshold} />
                       )}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* ── PEP detail ── */}
-              {activePanel === 'pep' && (
-                <div className="rounded-xl border border-slate-700/60 bg-slate-800/20 overflow-hidden">
-                  <div className="px-4 py-3 border-b border-slate-700/60 flex items-center gap-2.5">
-                    <User size={14} className="text-purple-400" />
-                    <span className="text-sm font-semibold text-white">PEP Matches</span>
-                    {pepResult?.totalPEPs && (
-                      <span className="ml-auto text-xs text-slate-500">
-                        {pepResult.totalPEPs.toLocaleString()} entries in index
-                      </span>
-                    )}
-                  </div>
-                  {pepMatches.length === 0 ? (
-                    <div className="py-12 text-center">
-                      <CheckCircle size={28} className="text-emerald-500 mx-auto mb-2.5" />
-                      <p className="text-slate-300 font-medium">No PEP matches found</p>
-                      <p className="text-slate-500 text-sm mt-1">Subject does not appear in the Politically Exposed Persons database above the {form.threshold}% threshold</p>
-                    </div>
-                  ) : (
-                    <div className="px-4">
-                      {pepMatches.map((m: any, i: number) => <PEPMatchRow key={i} m={m} index={i} />)}
                     </div>
                   )}
                 </div>
@@ -729,11 +624,11 @@ export default function ScreeningQuick() {
                       </div>
                       <p className="text-slate-300 font-medium">AI Analysis not yet run</p>
                       <p className="text-slate-500 text-sm mt-1 mb-4">
-                        Get an expert compliance assessment across both sanctions and PEP results
+                        Get an expert compliance assessment across all screening results
                       </p>
                       <button
-                        className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium transition-colors"
                         onClick={runAI}
+                        className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium transition-colors"
                       >
                         <Bot size={14} /> Run AI Analysis
                       </button>
@@ -741,49 +636,21 @@ export default function ScreeningQuick() {
                   )}
 
                   {!aiLoading && aiResult && (
-                    <div className="p-5 space-y-4">
-                      {/* Recommendation */}
-                      <div className="rounded-lg bg-slate-900/50 border border-slate-700/60 p-4">
-                        <div className="flex items-center gap-2 mb-2">
-                          <Activity size={13} className="text-blue-400" />
-                          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Recommendation</span>
-                        </div>
-                        <p className="text-slate-200 text-sm leading-relaxed">{aiResult.recommendation}</p>
+                    <div className="p-4 space-y-4">
+                      <div className="flex items-center gap-3">
+                        <Badge value={aiResult.risk_level || 'REVIEW_REQUIRED'} />
+                        <span className="text-sm text-slate-300">{aiResult.summary}</span>
                       </div>
-
-                      {/* Reasoning */}
-                      <div className="rounded-lg bg-slate-900/50 border border-slate-700/60 p-4">
-                        <div className="flex items-center gap-2 mb-2">
-                          <BarChart2 size={13} className="text-purple-400" />
-                          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Reasoning</span>
+                      {aiResult.reasoning && (
+                        <div className="rounded-lg bg-slate-900/40 border border-slate-700/40 p-3">
+                          <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Reasoning</div>
+                          <p className="text-sm text-slate-300 leading-relaxed">{aiResult.reasoning}</p>
                         </div>
-                        <p className="text-slate-300 text-sm leading-relaxed">{aiResult.reasoning}</p>
-                      </div>
-
-                      {/* Regulatory basis */}
-                      <div className="rounded-lg bg-slate-900/50 border border-slate-700/60 p-4">
-                        <div className="flex items-center gap-2 mb-2">
-                          <FileText size={13} className="text-emerald-400" />
-                          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Regulatory Basis</span>
-                        </div>
-                        <p className="text-slate-300 text-sm leading-relaxed">{aiResult.regulatory_basis}</p>
-                      </div>
-
-                      {/* Next steps */}
-                      {aiResult.next_steps?.length > 0 && (
-                        <div className="rounded-lg bg-slate-900/50 border border-slate-700/60 p-4">
-                          <div className="flex items-center gap-2 mb-3">
-                            <ChevronRight size={13} className="text-amber-400" />
-                            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Next Steps</span>
-                          </div>
-                          <ol className="space-y-2">
-                            {aiResult.next_steps.map((s: string, i: number) => (
-                              <li key={i} className="flex gap-3 text-sm text-slate-300">
-                                <span className="shrink-0 w-5 h-5 rounded-full bg-blue-500/15 text-blue-400 text-xs flex items-center justify-center font-bold">{i + 1}</span>
-                                <span>{s}</span>
-                              </li>
-                            ))}
-                          </ol>
+                      )}
+                      {aiResult.recommended_action && (
+                        <div className="rounded-lg bg-blue-900/10 border border-blue-800/30 p-3">
+                          <div className="text-xs font-semibold text-blue-400 uppercase tracking-wider mb-1">Recommended Action</div>
+                          <p className="text-sm text-slate-300">{aiResult.recommended_action}</p>
                         </div>
                       )}
                     </div>

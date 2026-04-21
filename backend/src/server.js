@@ -45,7 +45,7 @@ app.use('/api/audit', require('./routes/audit'));
 app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/rules', require('./routes/rules'));
 app.use('/api/users', require('./routes/users'));
-app.use('/api/pep',   require('./routes/pep'));
+app.use('/api/unified', require('./routes/unified'));
 
 // Health check
 app.get('/api/health', (req, res) => {
@@ -92,41 +92,9 @@ const PORT = process.env.API_PORT || 5000;
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`Sanctions Engine API running on port ${PORT}`);
 
-  // ── Load sanctions entries into RAM ──────────────────────────────────────
-  try {
-    const sanctionsEngine = require('./services/sanctionsEngine');
-    const result = await sanctionsEngine.loadEntries();
-    console.log(`[Startup] Sanctions engine ready: ${result.count.toLocaleString()} entries loaded in ${result.elapsed}ms`);
-  } catch (err) {
-    console.error('[Startup] Sanctions engine load failed (will use DB fallback):', err.message);
-  }
-
-  // ── Load PEP entries into RAM (non-blocking — runs in background) ─────────
-  try {
-    const pepEngine = require('./services/pepEngine');
-    console.log('[Startup] PEP engine loading in background (700k+ records)...');
-    pepEngine.loadEntries().then(result => {
-      console.log(`[Startup] PEP engine ready: ${result.count.toLocaleString()} entries loaded in ${result.elapsed}ms`);
-    }).catch(err => {
-      console.error('[Startup] PEP engine load failed:', err.message);
-    });
-  } catch (err) {
-    console.error('[Startup] PEP engine init failed:', err.message);
-  }
-  // Load PEP data: populate pep_entries_mem (SQL Server In-Memory OLTP) from
-  // pep_entries (disk), then build the Node.js RAM index for fast screening.
-  try {
-    const { loadPEPIntoMemTable } = require('./services/pepMemLoader');
-    const { loadPEPs } = require('./services/pepEngine');
-    console.log('[Startup] Loading PEP data into SQL Server In-Memory table (pep_entries_mem)...');
-    const memResult = await loadPEPIntoMemTable();
-    console.log(`[Startup] pep_entries_mem ready: ${memResult.rowCount.toLocaleString()} rows in ${(memResult.durationMs/1000).toFixed(1)}s`);
-    console.log('[Startup] Building PEP RAM index from pep_entries_mem...');
-    const pepResult = await loadPEPs();
-    console.log(`[Startup] PEP RAM index ready: ${pepResult.count.toLocaleString()} entries in ${pepResult.elapsed}ms`);
-  } catch (err) {
-    console.error('[Startup] PEP load failed (screening unavailable until /api/pep/load is called):', err.message);
-  }
+  // ── Load Unified RAM Index (PEP + Sanctions) in background ──────────────
+  console.log('[Startup] Unified RAM index loading in background (PEP + Sanctions)...');
+  // unifiedEngine auto-loads on startup via setTimeout(2000) in the module itself
 });
 
 module.exports = app;

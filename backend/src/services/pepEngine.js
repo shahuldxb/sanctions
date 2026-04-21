@@ -574,4 +574,19 @@ function getSourceLoadProgress(source) {
   return _sourceLoadProgress[source] || { loaded: 0, total: 0, pct: 0, isLoading: false };
 }
 
-module.exports = { loadPEPs, screenPEP, getPEPStatus, reloadPEPs, upsertPEPInRAM, loadSourceIntoRAM, getSourceLoadProgress };
+// ── Clear RAM index ──────────────────────────────────────────────────
+function clearRAM() {
+  const count = _pepEntries.size;
+  _pepEntries.clear();
+  _tokenIndex.clear();
+  _phoneticIndex.clear();
+  _trigramIndex.clear();
+  _entryCount = 0;
+  _loadedAt   = null;
+  _isLoading  = false;
+  _loadProgress = { loaded: 0, total: 0, pct: 0 };
+  console.log(`[PEPEngine] RAM index cleared (${count} entries removed).`);
+  return { cleared: count };
+}
+
+module.exports = { loadPEPs, screenPEP, getPEPStatus, reloadPEPs, upsertPEPInRAM, loadSourceIntoRAM, getSourceLoadProgress, clearRAM };

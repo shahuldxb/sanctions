@@ -53,6 +53,7 @@ const AuditLog = lazy(() => import('./pages/AuditLog'))
 const ScraperControl = lazy(() => import('./pages/process/ScraperControl'))
 const SanctionsListManager = lazy(() => import('./pages/process/SanctionsListManager'))
 const PEPManager = lazy(() => import('./pages/process/PEPManager'))
+const DataSources = lazy(() => import('./pages/process/DataSources'))
 const OFACDelta = lazy(() => import('./pages/process/OFACDelta'))
 const EnrichmentEngine = lazy(() => import('./pages/process/EnrichmentEngine'))
 const FuzzyEngine = lazy(() => import('./pages/process/FuzzyEngine'))
@@ -115,6 +116,7 @@ export default function App() {
               <Route path="/process/scraper" element={<ScraperControl />} />
               <Route path="/process/sanctions-manager" element={<SanctionsListManager />} />
               <Route path="/process/pep-manager" element={<PEPManager />} />
+              <Route path="/process/data-sources" element={<DataSources />} />
               <Route path="/process/ofac-delta" element={<OFACDelta />} />
               <Route path="/process/enrichment" element={<EnrichmentEngine />} />
               <Route path="/process/fuzzy" element={<FuzzyEngine />} />

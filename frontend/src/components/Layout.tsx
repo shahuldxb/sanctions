@@ -39,6 +39,7 @@ const nav: NavItem[] = [
   },
   {
     label: 'Process Control', icon: Cpu, children: [
+      { label: 'Data Sources', icon: Globe, path: '/process/data-sources', badge: 'NEW', badgeColor: 'bg-emerald-600' },
       { label: 'Sanctions List Manager', icon: Database, path: '/process/sanctions-manager' },
       { label: 'PEP Manager', icon: Users, path: '/process/pep-manager' },
       { label: 'Scraper Control', icon: RefreshCw, path: '/process/scraper' },
