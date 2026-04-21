@@ -373,4 +373,42 @@ router.post('/load-mem-table', async (req, res) => {
   }
 });
 
+// ── POST /api/pep/clear-source-table ── DELETE all pep_entries rows for a source ──
+router.post('/clear-source-table', async (req, res) => {
+  const { source } = req.body;
+  const validSources = ['OPENSANCTIONS_PEP', 'WIKIDATA', 'ICIJ'];
+  if (!source || !validSources.includes(source)) {
+    return res.status(400).json({ error: `source must be one of: ${validSources.join(', ')}` });
+  }
+  try {
+    const { getPool } = require('../db/connection');
+    const pool = await getPool();
+    const countRes = await pool.request().query(`SELECT COUNT(*) as cnt FROM pep_entries WHERE source = '${source}'`);
+    const before = countRes.recordset[0].cnt;
+    await pool.request().query(`DELETE FROM pep_entries WHERE source = '${source}'`);
+    res.json({ success: true, message: `Cleared ${before.toLocaleString()} rows from pep_entries for source: ${source}`, cleared: before, source });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/pep/clear-source-mem-table ── DELETE pep_entries_mem rows for a source ──
+router.post('/clear-source-mem-table', async (req, res) => {
+  const { source } = req.body;
+  const validSources = ['OPENSANCTIONS_PEP', 'WIKIDATA', 'ICIJ'];
+  if (!source || !validSources.includes(source)) {
+    return res.status(400).json({ error: `source must be one of: ${validSources.join(', ')}` });
+  }
+  try {
+    const { getPool } = require('../db/connection');
+    const pool = await getPool();
+    const countRes = await pool.request().query(`SELECT COUNT(*) as cnt FROM pep_entries_mem WHERE source = '${source}'`);
+    const before = countRes.recordset[0].cnt;
+    await pool.request().query(`DELETE FROM pep_entries_mem WHERE source = '${source}'`);
+    res.json({ success: true, message: `Cleared ${before.toLocaleString()} rows from pep_entries_mem for source: ${source}`, cleared: before, source });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

@@ -272,6 +272,77 @@ async function _doLoad() {
   }
 }
 
+// ── DB fallback screening (when RAM index is empty) ──────────────────────────
+async function screenUnifiedDB(name, opts = {}) {
+  const { threshold = 70, maxResults = 50 } = opts;
+  // Use a lower threshold for DB candidate retrieval to avoid missing near-exact matches
+  const candidateThreshold = Math.max(40, threshold - 20);
+  const norm = normalize(name);
+  const tokens = tokenize(name);
+  if (!tokens.length) return { results: [], totalInRAM: 0, indexReady: false, dbFallback: true };
+
+  // Build LIKE clauses — search each token in primary_name only (aliases may be NULL)
+  // Use AND for multi-token queries so we get tighter candidates
+  const primaryLike = tokens.map(t => `primary_name LIKE '%${t.replace(/'/g,"''")}%'`).join(' AND ');
+  const aliasLike   = tokens.map(t => `ISNULL(aliases,'') LIKE '%${t.replace(/'/g,"''")}%'`).join(' AND ');
+  const pepWhere    = `(${primaryLike}) OR (${aliasLike})`;
+
+  const [pepRows, sanctRows] = await Promise.all([
+    query(`
+      SELECT TOP 300 id, source AS source_code,
+        CASE source
+          WHEN 'OPENSANCTIONS_PEP' THEN 'OpenSanctions PEP'
+          WHEN 'WIKIDATA' THEN 'Wikidata SPARQL'
+          WHEN 'ICIJ' THEN 'ICIJ Offshore Leaks'
+          ELSE source END AS source_name,
+        'PEP' AS list_category,
+        external_id, schema_type AS entry_type, primary_name,
+        aliases, birth_date, countries, nationality, position,
+        political_party, gender, dataset, adverse_links,
+        wikidata_id, icij_node_id, status, first_seen AS listing_date
+      FROM pep_entries
+      WHERE status IN ('ACTIVE','DELISTED') AND (${pepWhere})
+    `).then(r => r.recordset).catch(() => []),
+    query(`
+      SELECT TOP 200 e.id, s.source_code, s.source_name,
+        'SANCTIONS' AS list_category,
+        e.external_id, e.entry_type, e.primary_name,
+        (SELECT STRING_AGG(a.alias_name, '|') FROM sanctions_aliases a WHERE a.entry_id = e.id) AS aliases,
+        e.dob AS birth_date, e.countries, e.nationality, e.position,
+        e.political_party, e.gender, e.dataset, e.adverse_links,
+        e.wikidata_id, e.icij_node_id, e.status,
+        CONVERT(NVARCHAR(50), e.listing_date, 23) AS listing_date
+      FROM sanctions_entries e
+      JOIN sanctions_list_sources s ON e.source_id = s.id
+      WHERE e.status IN ('ACTIVE','DELISTED') AND (
+        ${tokens.map(t => `e.primary_name LIKE '%${t.replace(/'/g,"''")}%'`).join(' AND ')}
+        OR EXISTS (
+          SELECT 1 FROM sanctions_aliases a
+          WHERE a.entry_id = e.id
+          AND ${tokens.map(t => `a.alias_name LIKE '%${t.replace(/'/g,"''")}%'`).join(' AND ')}
+        )
+      )
+    `).then(r => r.recordset).catch(() => []),
+  ]);
+
+  const candidates = [...pepRows, ...sanctRows];
+  const results = [];
+  for (const entry of candidates) {
+    const names = [entry.primary_name];
+    if (entry.aliases) for (const a of entry.aliases.split(/[|,;]/)) { const t = a.trim(); if (t) names.push(t); }
+    let best = 0, bestMatchedName = entry.primary_name;
+    for (const n of names) {
+      const s = scoreName(name, n);
+      if (s > best) { best = s; bestMatchedName = n; }
+    }
+    if (best >= candidateThreshold) results.push({ ...entry, score: best, matchedName: bestMatchedName });
+  }
+  results.sort((a, b) => b.score - a.score);
+  // Filter to user's threshold after scoring
+  const filtered = results.filter(r => r.score >= threshold);
+  return { results: filtered.slice(0, maxResults), totalInRAM: 0, indexReady: false, dbFallback: true, query: name };
+}
+
 // ── Screening function ────────────────────────────────────────────────────────
 function screenUnified(name, opts = {}) {
   const {
@@ -281,7 +352,7 @@ function screenUnified(name, opts = {}) {
     filterList   = null,   // e.g. 'OFAC' or 'WIKIDATA' or null for all
   } = opts;
 
-  if (!_entryMap.size) return { results: [], totalInRAM: 0, indexReady: false };
+  if (!_entryMap.size) return null; // signal caller to use DB fallback
 
   const candidates = new Map(); // key → best score
 
@@ -443,6 +514,7 @@ setTimeout(() => {
 module.exports = {
   loadUnified,
   screenUnified,
+  screenUnifiedDB,
   getUnifiedStatus,
   reloadCategory,
   clearRAM,

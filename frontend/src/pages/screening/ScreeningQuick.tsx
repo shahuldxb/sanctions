@@ -247,14 +247,12 @@ export default function ScreeningQuick() {
   const [loading,     setLoading]     = useState(false)
   const [aiLoading,   setAiLoading]   = useState(false)
   const [aiResult,    setAiResult]    = useState<any>(null)
-  const [activePanel, setActivePanel] = useState<'all' | 'sanctions' | 'pep' | 'ai'>('all')
 
   const screen = async () => {
     if (!form.name.trim()) { toast.error('Please enter a name'); return }
     setLoading(true)
     setResult(null)
     setAiResult(null)
-    setActivePanel('all')
 
     try {
       const res = await axios.post('/api/unified/screen', {
@@ -282,7 +280,6 @@ export default function ScreeningQuick() {
   const runAI = async () => {
     if (!result?.results?.length) return
     setAiLoading(true)
-    setActivePanel('ai')
     try {
       const allMatches = (result.results || []).map((m: any) => ({
         primary_name: m.primary_name,
@@ -304,21 +301,12 @@ export default function ScreeningQuick() {
   }
 
   const allMatches     = (result?.results || []) as any[]
-  const sanctionHits   = allMatches.filter((m: any) => m.list_category === 'SANCTIONS')
-  const pepHits        = allMatches.filter((m: any) => m.list_category === 'PEP')
   const confirmedHits  = allMatches.filter((m: any) => m.score >= 90)
   const reviewHits     = allMatches.filter((m: any) => m.score >= 70 && m.score < 90)
-  const possibleHits   = allMatches.filter((m: any) => m.score < 70)
   const hasResults     = result !== null
-  const topScore       = allMatches[0]?.score ?? 0
 
-  const displayMatches = activePanel === 'all'       ? allMatches
-                       : activePanel === 'sanctions'  ? sanctionHits
-                       : activePanel === 'pep'        ? pepHits
-                       : []
-
-  const displayConfirmed = displayMatches.filter((m: any) => m.score >= 90)
-  const displayLower     = displayMatches.filter((m: any) => m.score < 90)
+  const displayConfirmed = allMatches.filter((m: any) => m.score >= 90)
+  const displayLower     = allMatches.filter((m: any) => m.score < 90)
 
   return (
     <div className="space-y-0">
@@ -529,56 +517,25 @@ export default function ScreeningQuick() {
                 ))}
               </div>
 
-              {/* ── Tab bar ── */}
-              <div className="flex items-center gap-1 bg-slate-800/40 rounded-lg p-1 border border-slate-700/40">
-                {[
-                  { id: 'all',       label: 'All Results',  count: allMatches.length,    icon: Activity },
-                  { id: 'sanctions', label: 'Sanctions',    count: sanctionHits.length,  icon: Shield },
-                  { id: 'pep',       label: 'PEP',          count: pepHits.length,       icon: User },
-                  { id: 'ai',        label: 'AI Analysis',  count: null,                 icon: Bot },
-                ].map(tab => (
-                  <button
-                    key={tab.id}
-                    onClick={() => setActivePanel(tab.id as any)}
-                    className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-md text-sm font-medium transition-all ${
-                      activePanel === tab.id
-                        ? 'bg-slate-700 text-white shadow-sm'
-                        : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    <tab.icon size={14} />
-                    <span>{tab.label}</span>
-                    {tab.count !== null && (
-                      <span className={`text-xs px-1.5 py-0.5 rounded-full font-mono ${
-                        activePanel === tab.id ? 'bg-slate-600 text-slate-200' : 'bg-slate-700/60 text-slate-500'
-                      }`}>
-                        {tab.count}
-                      </span>
-                    )}
-                  </button>
-                ))}
-              </div>
+
 
               {/* ── Match list ── */}
-              {activePanel !== 'ai' && (
-                <div className="rounded-xl border border-slate-700/60 bg-slate-800/20 overflow-hidden">
+              <div className="rounded-xl border border-slate-700/60 bg-slate-800/20 overflow-hidden">
                   <div className="px-4 py-3 border-b border-slate-700/60 flex items-center gap-2.5">
-                    {activePanel === 'all'       && <Activity size={14} className="text-blue-400" />}
-                    {activePanel === 'sanctions' && <Shield size={14} className="text-blue-400" />}
-                    {activePanel === 'pep'       && <User size={14} className="text-purple-400" />}
-                    <span className="text-sm font-semibold text-white">
-                      {activePanel === 'all' ? 'All Matches' : activePanel === 'sanctions' ? 'Sanctions Matches' : 'PEP Matches'}
-                    </span>
+                    <Activity size={14} className="text-blue-400" />
+                    <span className="text-sm font-semibold text-white">All Matches</span>
                     <span className="ml-auto text-xs text-slate-500">
-                      {displayMatches.length} result{displayMatches.length !== 1 ? 's' : ''} · sorted by score
+                      {allMatches.length} result{allMatches.length !== 1 ? 's' : ''} · sorted by score
+                      {result?.dbFallback && <span className="ml-2 text-amber-400">(DB fallback)</span>}
                     </span>
                   </div>
 
-                  {displayMatches.length === 0 ? (
+                  {allMatches.length === 0 ? (
                     <div className="py-12 text-center">
                       <CheckCircle size={28} className="text-emerald-500 mx-auto mb-2.5" />
                       <p className="text-slate-300 font-medium">No matches found</p>
                       <p className="text-slate-500 text-sm mt-1">Subject is not on any monitored list above the {form.threshold}% threshold</p>
+                      {result?.dbFallback && <p className="text-slate-600 text-xs mt-1">Searched via database fallback (RAM index not loaded)</p>}
                     </div>
                   ) : (
                     <div className="px-4">
@@ -598,11 +555,10 @@ export default function ScreeningQuick() {
                       )}
                     </div>
                   )}
-                </div>
-              )}
+              </div>
 
               {/* ── AI Analysis ── */}
-              {activePanel === 'ai' && (
+              {hasResults && (
                 <div className="rounded-xl border border-slate-700/60 bg-slate-800/20 overflow-hidden">
                   <div className="px-4 py-3 border-b border-slate-700/60 flex items-center gap-2.5">
                     <Bot size={14} className="text-blue-400" />

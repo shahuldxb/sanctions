@@ -9,6 +9,7 @@ const router  = express.Router();
 const {
   loadUnified,
   screenUnified,
+  screenUnifiedDB,
   getUnifiedStatus,
   reloadCategory,
   clearRAM,
@@ -55,9 +56,9 @@ router.post('/clear', (req, res) => {
   }
 });
 
-// ── POST /api/unified/screen ──────────────────────────────────────────────────
+// ── POST /api/unified/screen ──────────────────────────────────────────────────────────────────
 // Main unified screening endpoint
-router.post('/screen', (req, res) => {
+router.post('/screen', async (req, res) => {
   try {
     const {
       name,
@@ -71,20 +72,23 @@ router.post('/screen', (req, res) => {
       return res.status(400).json({ error: 'name is required' });
     }
 
-    const t0     = Date.now();
-    const result = screenUnified(name.trim(), {
+    const t0 = Date.now();
+    // Try RAM index first; fall back to DB if index not loaded
+    let result = screenUnified(name.trim(), {
       threshold:    parseInt(threshold),
       maxResults:   parseInt(maxResults),
       filterSource,
       filterList,
     });
+    if (!result) {
+      result = await screenUnifiedDB(name.trim(), {
+        threshold:  parseInt(threshold),
+        maxResults: parseInt(maxResults),
+      });
+    }
     const durationMs = Date.now() - t0;
 
-    res.json({
-      ...result,
-      durationMs,
-      threshold,
-    });
+    res.json({ ...result, durationMs, threshold });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
