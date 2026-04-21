@@ -6,6 +6,8 @@ const { query } = require('../db/connection');
 const { screenPEP, getPEPStatus, reloadPEPs } = require('../services/pepEngine');
 const { runFullPEPLoad, getPEPRunStatus } = require('../services/pepScraper');
 const { runBCPLoad, getBCPStatus, requestStop, requestPause, requestResume } = require('../services/pepBCPLoader');
+const { loadWikidata, getWikidataStatus } = require('../services/wikidataLoader');
+const { loadICIJ, getICIJStatus }         = require('../services/icijLoader');
 
 // ── GET /api/pep/status ───────────────────────────────────────────────────────
 router.get('/status', (req, res) => {
@@ -202,6 +204,38 @@ router.post('/bcp-resume', (req, res) => {
 // ── GET /api/pep/bcp-status ───────────────────────────────────────────────────
 router.get('/bcp-status', (req, res) => {
   res.json(getBCPStatus());
+});
+
+// ── POST /api/pep/wikidata-load ──────────────────────────────────────────────
+router.post('/wikidata-load', (req, res) => {
+  const st = getWikidataStatus();
+  if (st.status === 'running') {
+    return res.status(409).json({ error: 'Wikidata loader is already running', status: st });
+  }
+  // Fire and forget — client polls /wikidata-status
+  loadWikidata().catch(e => console.error('[WikidataLoader] Fatal:', e.message));
+  res.json({ message: 'Wikidata load started', status: 'running' });
+});
+
+// ── GET /api/pep/wikidata-status ──────────────────────────────────────────────
+router.get('/wikidata-status', (req, res) => {
+  res.json(getWikidataStatus());
+});
+
+// ── POST /api/pep/icij-load ───────────────────────────────────────────────────
+router.post('/icij-load', (req, res) => {
+  const st = getICIJStatus();
+  if (st.status === 'running') {
+    return res.status(409).json({ error: 'ICIJ loader is already running', status: st });
+  }
+  // Fire and forget — client polls /icij-status
+  loadICIJ().catch(e => console.error('[ICIJLoader] Fatal:', e.message));
+  res.json({ message: 'ICIJ load started', status: 'running' });
+});
+
+// ── GET /api/pep/icij-status ──────────────────────────────────────────────────
+router.get('/icij-status', (req, res) => {
+  res.json(getICIJStatus());
 });
 
 module.exports = router;

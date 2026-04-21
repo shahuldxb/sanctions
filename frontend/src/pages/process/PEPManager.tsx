@@ -209,28 +209,34 @@ const PEP_SOURCES = [
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 export default function PEPManager() {
-  const [stats,        setStats]        = useState<any>(null)
-  const [loadStatus,   setLoadStatus]   = useState<any>(null)
-  const [bcpStatus,    setBCPStatus]    = useState<any>(null)
-  const [legacyRunning,setLegacyRunning]= useState(false)
-  const [ramLoading,   setRamLoading]   = useState(false)
-  const [reloadResult, setReloadResult] = useState<any>(null)
-  const [error,        setError]        = useState<string | null>(null)
-  const [showInfo,     setShowInfo]     = useState(false)
-  const [showLogs,     setShowLogs]     = useState(false)
-  const [confirmStop,  setConfirmStop]  = useState(false)
-  const [actionLoading,setActionLoading]= useState<string | null>(null)
+  const [stats,          setStats]          = useState<any>(null)
+  const [loadStatus,     setLoadStatus]     = useState<any>(null)
+  const [bcpStatus,      setBCPStatus]      = useState<any>(null)
+  const [wikidataStatus, setWikidataStatus] = useState<any>(null)
+  const [icijStatus,     setICIJStatus]     = useState<any>(null)
+  const [legacyRunning,  setLegacyRunning]  = useState(false)
+  const [ramLoading,     setRamLoading]     = useState(false)
+  const [reloadResult,   setReloadResult]   = useState<any>(null)
+  const [error,          setError]          = useState<string | null>(null)
+  const [showInfo,       setShowInfo]       = useState(false)
+  const [showLogs,       setShowLogs]       = useState(false)
+  const [confirmStop,    setConfirmStop]    = useState(false)
+  const [actionLoading,  setActionLoading]  = useState<string | null>(null)
 
   const fetchAll = useCallback(async () => {
     try {
-      const [statsRes, loadRes, bcpRes] = await Promise.all([
+      const [statsRes, loadRes, bcpRes, wdRes, icijRes] = await Promise.all([
         fetch(`${API}/pep/stats`).then(r => r.json()).catch(() => null),
         fetch(`${API}/pep/load-status`).then(r => r.json()).catch(() => null),
         fetch(`${API}/pep/bcp-status`).then(r => r.json()).catch(() => null),
+        fetch(`${API}/pep/wikidata-status`).then(r => r.json()).catch(() => null),
+        fetch(`${API}/pep/icij-status`).then(r => r.json()).catch(() => null),
       ])
       if (statsRes) setStats(statsRes)
       if (loadRes)  setLoadStatus(loadRes)
       if (bcpRes)   setBCPStatus(bcpRes)
+      if (wdRes)    setWikidataStatus(wdRes)
+      if (icijRes)  setICIJStatus(icijRes)
     } catch (_) {}
   }, [])
 
@@ -316,6 +322,26 @@ export default function PEPManager() {
       fetchAll()
     } catch (e: any) { setError(e.message) }
     finally { setRamLoading(false) }
+  }
+
+  async function startWikidataLoad() {
+    setError(null)
+    try {
+      const r = await fetch(`${API}/pep/wikidata-load`, { method: 'POST' })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.error || 'Failed to start Wikidata load')
+      fetchAll()
+    } catch (e: any) { setError(e.message) }
+  }
+
+  async function startICIJLoad() {
+    setError(null)
+    try {
+      const r = await fetch(`${API}/pep/icij-load`, { method: 'POST' })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.error || 'Failed to start ICIJ load')
+      fetchAll()
+    } catch (e: any) { setError(e.message) }
   }
 
   // ── Derived state ─────────────────────────────────────────────────────────────
@@ -656,13 +682,13 @@ export default function PEPManager() {
       <div>
         <div className="text-xs text-slate-400 font-semibold uppercase tracking-wider mb-3">Data Sources</div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {PEP_SOURCES.map(src => {
-            const dbRow = stats?.bySource?.find((b: any) =>
-              b.source === src.code || b.source.toLowerCase().includes(src.code.toLowerCase().split('_')[0])
-            )
-            const integrated = src.method === 'BCP'
+
+          {/* ── OpenSanctions PEP (BCP) ── */}
+          {(() => {
+            const src = PEP_SOURCES[0]
+            const dbRow = stats?.bySource?.find((b: any) => b.source === src.code)
             return (
-              <div key={src.code} className={`bg-slate-800 border border-slate-700 rounded-xl p-4 space-y-3 ${!integrated ? 'opacity-60' : ''}`}>
+              <div key={src.code} className="bg-slate-800 border border-slate-700 rounded-xl p-4 space-y-3">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center gap-2.5">
                     <span className="text-2xl leading-none">{src.flag}</span>
@@ -671,9 +697,7 @@ export default function PEPManager() {
                       <div className="text-slate-400 text-xs mt-0.5">{src.desc}</div>
                     </div>
                   </div>
-                  <span className={`text-xs px-1.5 py-0.5 rounded font-mono shrink-0 ${src.method === 'BCP' ? 'bg-violet-900 text-violet-300' : 'bg-slate-700 text-slate-400'}`}>
-                    {src.method}
-                  </span>
+                  <span className="text-xs px-1.5 py-0.5 rounded font-mono shrink-0 bg-violet-900 text-violet-300">{src.method}</span>
                 </div>
                 <div className="grid grid-cols-2 gap-2 text-xs">
                   <div className="bg-slate-900 rounded-lg p-2"><div className="text-slate-500 mb-0.5">Expected</div><div className="text-white font-bold">{src.records}</div></div>
@@ -688,10 +712,177 @@ export default function PEPManager() {
                     <div className="flex justify-between text-slate-500"><span>With Date of Birth</span><span className="text-emerald-400 font-medium">{fmtNum(dbRow.with_dob)}</span></div>
                   </div>
                 )}
-                {!integrated && <div className="text-xs text-slate-500 italic pt-1 border-t border-slate-700">Not yet integrated</div>}
+                <div className="text-xs text-emerald-500 flex items-center gap-1 pt-1 border-t border-slate-700">
+                  <CheckCircle size={11} /> Integrated via 7-stage BCP pipeline
+                </div>
               </div>
             )
-          })}
+          })()}
+
+          {/* ── Wikidata SPARQL ── */}
+          {(() => {
+            const src    = PEP_SOURCES[1]
+            const dbRow  = stats?.bySource?.find((b: any) => b.source === 'WIKIDATA')
+            const wdSt   = wikidataStatus?.status ?? 'idle'
+            const wdPct  = wikidataStatus?.progress?.pct ?? 0
+            const wdLoaded = wikidataStatus?.progress?.loaded ?? 0
+            const wdTotal  = wikidataStatus?.progress?.total ?? 5
+            const wdRunning = wdSt === 'running'
+            const wdDone    = wdSt === 'completed'
+            const wdError   = wdSt === 'error'
+            return (
+              <div key={src.code} className="bg-slate-800 border border-slate-700 rounded-xl p-4 space-y-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-2xl leading-none">{src.flag}</span>
+                    <div>
+                      <div className="font-bold text-white text-sm">{src.name}</div>
+                      <div className="text-slate-400 text-xs mt-0.5">{src.desc}</div>
+                    </div>
+                  </div>
+                  <span className="text-xs px-1.5 py-0.5 rounded font-mono shrink-0 bg-blue-900 text-blue-300">{src.method}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="bg-slate-900 rounded-lg p-2"><div className="text-slate-500 mb-0.5">Expected</div><div className="text-white font-bold">{src.records}</div></div>
+                  <div className="bg-slate-900 rounded-lg p-2"><div className="text-slate-500 mb-0.5">In DB</div><div className="text-emerald-400 font-bold">{fmtNum(dbRow?.cnt ?? 0)}</div></div>
+                  <div className="bg-slate-900 rounded-lg p-2"><div className="text-slate-500 mb-0.5">Update Freq</div><div className="text-violet-300">{src.freq}</div></div>
+                  <div className="bg-slate-900 rounded-lg p-2"><div className="text-slate-500 mb-0.5">Queries</div><div className="text-slate-300">5 SPARQL</div></div>
+                </div>
+
+                {/* Progress bar when running */}
+                {wdRunning && (
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between text-xs text-slate-400">
+                      <span className="text-blue-300 font-medium animate-pulse">● LOADING — Query {wdLoaded}/{wdTotal}</span>
+                      <span>{wdPct}%</span>
+                    </div>
+                    <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-all duration-500"
+                        style={{ width: `${wdPct}%`, background: 'linear-gradient(90deg, #3b82f6, #8b5cf6)' }}
+                      />
+                    </div>
+                    {wikidataStatus?.logs?.slice(-1)[0] && (
+                      <div className="text-xs text-slate-500 truncate">{wikidataStatus.logs.slice(-1)[0].msg}</div>
+                    )}
+                  </div>
+                )}
+
+                {/* Completed state */}
+                {wdDone && (
+                  <div className="text-xs text-emerald-400 flex items-center gap-1 pt-1 border-t border-slate-700">
+                    <CheckCircle size={11} /> Loaded {(wikidataStatus?.stats?.total ?? 0).toLocaleString()} entries
+                    {wikidataStatus?.completedAt && <span className="text-slate-500 ml-1">({new Date(wikidataStatus.completedAt).toLocaleString()})</span>}
+                  </div>
+                )}
+
+                {/* Error state */}
+                {wdError && (
+                  <div className="text-xs text-red-400 pt-1 border-t border-slate-700">
+                    ✗ {wikidataStatus?.error || 'Load failed'}
+                  </div>
+                )}
+
+                {/* Load button */}
+                <div className="pt-1 border-t border-slate-700">
+                  <button
+                    onClick={startWikidataLoad}
+                    disabled={wdRunning}
+                    className={`w-full text-xs py-2 px-3 rounded-lg font-medium transition-all ${
+                      wdRunning
+                        ? 'bg-slate-700 text-slate-500 cursor-not-allowed'
+                        : 'bg-blue-600 hover:bg-blue-500 text-white cursor-pointer'
+                    }`}
+                  >
+                    {wdRunning ? '⏳ Loading Wikidata...' : wdDone ? '🔄 Reload Wikidata' : '▶ Load Wikidata SPARQL'}
+                  </button>
+                </div>
+              </div>
+            )
+          })()}
+
+          {/* ── ICIJ Offshore Leaks ── */}
+          {(() => {
+            const src    = PEP_SOURCES[2]
+            const dbRow  = stats?.bySource?.find((b: any) => b.source === 'ICIJ')
+            const icSt   = icijStatus?.status ?? 'idle'
+            const icPct  = icijStatus?.progress?.pct ?? 0
+            const icLoaded = icijStatus?.progress?.loaded ?? 0
+            const icTotal  = icijStatus?.progress?.total ?? 810000
+            const icRunning = icSt === 'running'
+            const icDone    = icSt === 'completed'
+            const icError   = icSt === 'error'
+            return (
+              <div key={src.code} className="bg-slate-800 border border-slate-700 rounded-xl p-4 space-y-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-2xl leading-none">{src.flag}</span>
+                    <div>
+                      <div className="font-bold text-white text-sm">{src.name}</div>
+                      <div className="text-slate-400 text-xs mt-0.5">{src.desc}</div>
+                    </div>
+                  </div>
+                  <span className="text-xs px-1.5 py-0.5 rounded font-mono shrink-0 bg-amber-900 text-amber-300">{src.method}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="bg-slate-900 rounded-lg p-2"><div className="text-slate-500 mb-0.5">Expected</div><div className="text-white font-bold">{src.records}</div></div>
+                  <div className="bg-slate-900 rounded-lg p-2"><div className="text-slate-500 mb-0.5">In DB</div><div className="text-emerald-400 font-bold">{fmtNum(dbRow?.cnt ?? 0)}</div></div>
+                  <div className="bg-slate-900 rounded-lg p-2"><div className="text-slate-500 mb-0.5">Update Freq</div><div className="text-violet-300">{src.freq}</div></div>
+                  <div className="bg-slate-900 rounded-lg p-2"><div className="text-slate-500 mb-0.5">Datasets</div><div className="text-slate-300">5 leaks</div></div>
+                </div>
+
+                {/* Progress bar when running */}
+                {icRunning && (
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between text-xs text-slate-400">
+                      <span className="text-amber-300 font-medium animate-pulse">● LOADING</span>
+                      <span>{icLoaded.toLocaleString()} / ~{icTotal.toLocaleString()} ({icPct}%)</span>
+                    </div>
+                    <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-all duration-500"
+                        style={{ width: `${Math.max(icPct, 1)}%`, background: 'linear-gradient(90deg, #f59e0b, #ef4444)' }}
+                      />
+                    </div>
+                    {icijStatus?.logs?.slice(-1)[0] && (
+                      <div className="text-xs text-slate-500 truncate">{icijStatus.logs.slice(-1)[0].msg}</div>
+                    )}
+                  </div>
+                )}
+
+                {/* Completed state */}
+                {icDone && (
+                  <div className="text-xs text-emerald-400 flex items-center gap-1 pt-1 border-t border-slate-700">
+                    <CheckCircle size={11} /> Loaded {(icijStatus?.stats?.total ?? 0).toLocaleString()} entities
+                    {icijStatus?.completedAt && <span className="text-slate-500 ml-1">({new Date(icijStatus.completedAt).toLocaleString()})</span>}
+                  </div>
+                )}
+
+                {/* Error state */}
+                {icError && (
+                  <div className="text-xs text-red-400 pt-1 border-t border-slate-700">
+                    ✗ {icijStatus?.error || 'Load failed'}
+                  </div>
+                )}
+
+                {/* Load button */}
+                <div className="pt-1 border-t border-slate-700">
+                  <button
+                    onClick={startICIJLoad}
+                    disabled={icRunning}
+                    className={`w-full text-xs py-2 px-3 rounded-lg font-medium transition-all ${
+                      icRunning
+                        ? 'bg-slate-700 text-slate-500 cursor-not-allowed'
+                        : 'bg-amber-700 hover:bg-amber-600 text-white cursor-pointer'
+                    }`}
+                  >
+                    {icRunning ? '⏳ Loading ICIJ...' : icDone ? '🔄 Reload ICIJ' : '▶ Load ICIJ Offshore Leaks'}
+                  </button>
+                </div>
+              </div>
+            )
+          })()}
+
         </div>
       </div>
 
