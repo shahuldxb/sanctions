@@ -574,6 +574,16 @@ function getSourceLoadProgress(source) {
   return _sourceLoadProgress[source] || { loaded: 0, total: 0, pct: 0, isLoading: false };
 }
 
+// ── Count RAM entries by source ─────────────────────────────────────────────
+function getRAMCountBySource() {
+  const counts = {};
+  for (const entry of _pepEntries.values()) {
+    const src = entry.source || 'UNKNOWN';
+    counts[src] = (counts[src] || 0) + 1;
+  }
+  return counts;
+}
+
 // ── Clear RAM index ──────────────────────────────────────────────────
 function clearRAM() {
   const count = _pepEntries.size;
@@ -589,4 +599,4 @@ function clearRAM() {
   return { cleared: count };
 }
 
-module.exports = { loadPEPs, screenPEP, getPEPStatus, reloadPEPs, upsertPEPInRAM, loadSourceIntoRAM, getSourceLoadProgress, clearRAM };
+module.exports = { loadPEPs, screenPEP, getPEPStatus, reloadPEPs, upsertPEPInRAM, loadSourceIntoRAM, getSourceLoadProgress, clearRAM, getRAMCountBySource };

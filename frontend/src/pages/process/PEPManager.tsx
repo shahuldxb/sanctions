@@ -300,6 +300,9 @@ export default function PEPManager() {
   async function handleStart() {
     setActionLoading('start'); setError(null)
     try {
+      // Reset stage badges to WAITING before starting
+      await fetch(`${API}/pep/bcp-reset`, { method: 'POST' }).catch(() => {})
+      await fetchAll()
       const r = await fetch(`${API}/pep/bcp-load`, { method: 'POST' })
       const d = await r.json()
       if (!r.ok && !d.error?.includes('already')) throw new Error(d.error)
@@ -329,6 +332,9 @@ export default function PEPManager() {
     setActionLoading('restart'); setError(null)
     try {
       if (isActive) { await fetch(`${API}/pep/bcp-stop`, { method: 'POST' }).catch(() => {}); await new Promise(r => setTimeout(r, 1500)) }
+      // Reset stage badges to WAITING before restarting
+      await fetch(`${API}/pep/bcp-reset`, { method: 'POST' }).catch(() => {})
+      await fetchAll()
       const r = await fetch(`${API}/pep/bcp-load`, { method: 'POST' }); const d = await r.json()
       if (!r.ok) throw new Error(d.error); setShowLogs(true)
     } catch (e: any) { setError(e.message) }
@@ -523,9 +529,11 @@ export default function PEPManager() {
                 { label: 'With Position', value: fmtNum(osRow?.with_position), color: 'text-slate-300' },
               ]}
               extraStats={[
-                { label: 'With Wikidata ID',  value: fmtNum(osRow?.with_wikidata),      color: 'text-blue-400 font-medium' },
+                { label: 'With Wikidata ID',   value: fmtNum(osRow?.with_wikidata),      color: 'text-blue-400 font-medium' },
                 { label: 'With Adverse Links', value: fmtNum(osRow?.with_adverse_links), color: 'text-amber-400 font-medium' },
                 { label: 'With Date of Birth', value: fmtNum(osRow?.with_dob),           color: 'text-emerald-400 font-medium' },
+                { label: 'In Memory Table',    value: fmtNum(osRow?.in_mem_table),       color: 'text-cyan-400 font-medium' },
+                { label: 'In RAM Index',       value: fmtNum(osRow?.in_ram),             color: 'text-violet-400 font-medium' },
               ]}
               loadStatus={bcpSt}
               loadProgress={null}
@@ -556,9 +564,11 @@ export default function PEPManager() {
                 { label: 'Queries',     value: '5 SPARQL',            color: 'text-slate-300' },
               ]}
               extraStats={[
-                { label: 'With Position',  value: fmtNum(wdRow?.with_position), color: 'text-blue-400 font-medium' },
-                { label: 'With Wikidata ID', value: fmtNum(wdRow?.with_wikidata), color: 'text-violet-400 font-medium' },
-                { label: 'With Date of Birth', value: fmtNum(wdRow?.with_dob), color: 'text-emerald-400 font-medium' },
+                { label: 'With Position',      value: fmtNum(wdRow?.with_position),  color: 'text-blue-400 font-medium' },
+                { label: 'With Wikidata ID',   value: fmtNum(wdRow?.with_wikidata),  color: 'text-violet-400 font-medium' },
+                { label: 'With Date of Birth', value: fmtNum(wdRow?.with_dob),       color: 'text-emerald-400 font-medium' },
+                { label: 'In Memory Table',    value: fmtNum(wdRow?.in_mem_table),   color: 'text-cyan-400 font-medium' },
+                { label: 'In RAM Index',       value: fmtNum(wdRow?.in_ram),         color: 'text-violet-400 font-medium' },
               ]}
               loadStatus={wdSt}
               loadProgress={wdProg}
@@ -592,6 +602,8 @@ export default function PEPManager() {
                 { label: 'With Adverse Links', value: fmtNum(icRow?.with_adverse_links), color: 'text-amber-400 font-medium' },
                 { label: 'With Countries',     value: fmtNum(icRow?.with_countries),     color: 'text-blue-400 font-medium' },
                 { label: 'With Dataset Tag',   value: fmtNum(icRow?.with_dataset),       color: 'text-emerald-400 font-medium' },
+                { label: 'In Memory Table',    value: fmtNum(icRow?.in_mem_table),       color: 'text-cyan-400 font-medium' },
+                { label: 'In RAM Index',       value: fmtNum(icRow?.in_ram),             color: 'text-violet-400 font-medium' },
               ]}
               loadStatus={icSt}
               loadProgress={icProg}

@@ -148,6 +148,24 @@ function getBCPStatus() {
   };
 }
 
+// ── Reset status to idle (clears stage badges to WAITING before re-run) ───────
+function resetBCPStatus() {
+  if (_status.status === 'running' || _status.status === 'paused') return; // safety: don't reset while running
+  _abortFlag = false;
+  _pauseFlag = false;
+  _status = {
+    status:         'idle',
+    phase:          null,
+    phaseStartedAt: null,
+    startedAt:      null,
+    completedAt:    null,
+    timings: { download_ms: 0, transform_ms: 0, bcp_ms: 0, merge_ms: 0, audit_ms: 0, mem_table_ms: 0, ram_index_ms: 0, total_ms: 0 },
+    stats:   { downloaded_bytes: 0, rows_in_staging: 0, rows_merged: 0, rows_added: 0, rows_updated: 0 },
+    error:   null,
+    logs:    [],
+  };
+}
+
 // ── Abort/pause helpers ───────────────────────────────────────────────────────
 function requestStop() {
   _abortFlag = true;
@@ -565,4 +583,4 @@ async function runBCPLoad() {
   }
 }
 
-module.exports = { runBCPLoad, getBCPStatus, requestStop, requestPause, requestResume };
+module.exports = { runBCPLoad, getBCPStatus, resetBCPStatus, requestStop, requestPause, requestResume };

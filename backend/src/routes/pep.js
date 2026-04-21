@@ -3,9 +3,9 @@
 const express = require('express');
 const router  = express.Router();
 const { query } = require('../db/connection');
-const { screenPEP, getPEPStatus, reloadPEPs, loadSourceIntoRAM } = require('../services/pepEngine');
+const { screenPEP, getPEPStatus, reloadPEPs, loadSourceIntoRAM, getRAMCountBySource } = require('../services/pepEngine');
 const { runFullPEPLoad, getPEPRunStatus } = require('../services/pepScraper');
-const { runBCPLoad, getBCPStatus, requestStop, requestPause, requestResume } = require('../services/pepBCPLoader');
+const { runBCPLoad, getBCPStatus, resetBCPStatus, requestStop, requestPause, requestResume } = require('../services/pepBCPLoader');
 const { loadWikidata, getWikidataStatus } = require('../services/wikidataLoader');
 const { loadICIJ, getICIJStatus }         = require('../services/icijLoader');
 
@@ -144,9 +144,26 @@ router.get('/stats', async (req, res) => {
       FROM pep_entries WHERE status = 'ACTIVE'
       GROUP BY source ORDER BY cnt DESC
     `);
+    const bySourceMem = await query(`
+      SELECT source, COUNT(*) as cnt
+      FROM pep_entries_mem
+      GROUP BY source
+    `).catch(() => ({ recordset: [] }));
     const total = await query("SELECT COUNT(*) as cnt FROM pep_entries WHERE status = 'ACTIVE'");
     const memTotal = await query('SELECT COUNT(*) as cnt FROM pep_entries_mem').catch(() => ({ recordset: [{ cnt: 0 }] }));
     const ramStatus = getPEPStatus();
+    const ramBySource = getRAMCountBySource();
+    // Build per-source mem counts map
+    const memBySource = {};
+    for (const row of (bySourceMem.recordset || [])) {
+      memBySource[row.source] = row.cnt;
+    }
+    // Merge mem and RAM counts into bySource rows
+    const bySourceEnriched = bySource.recordset.map(row => ({
+      ...row,
+      in_mem_table: memBySource[row.source] || 0,
+      in_ram:       ramBySource[row.source] || 0,
+    }));
     res.json({
       totalInDB:       total.recordset[0].cnt,
       totalInMemTable: memTotal.recordset[0].cnt,
@@ -154,7 +171,9 @@ router.get('/stats', async (req, res) => {
       loadedAt:        ramStatus.loadedAt,
       isLoading:       ramStatus.isLoading || false,
       loadProgress:    ramStatus.loadProgress || { loaded: 0, total: 0, pct: 0 },
-      bySource:        bySource.recordset,
+      bySource:        bySourceEnriched,
+      ramBySource,
+      memBySource,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -201,7 +220,12 @@ router.post('/bcp-resume', (req, res) => {
   res.json({ message: 'Pipeline resumed' });
 });
 
-// ── GET /api/pep/bcp-status ───────────────────────────────────────────────────
+// ── POST /api/pep/bcp-reset ─────────────────────────────────────────────────────────────────────
+router.post('/bcp-reset', (req, res) => {
+  resetBCPStatus();
+  res.json({ message: 'BCP status reset to idle', status: getBCPStatus() });
+});
+// ── GET /api/pep/bcp-status ─────────────────────────────────────────────────────────────────────
 router.get('/bcp-status', (req, res) => {
   res.json(getBCPStatus());
 });
