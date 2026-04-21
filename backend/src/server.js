@@ -45,6 +45,7 @@ app.use('/api/audit', require('./routes/audit'));
 app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/rules', require('./routes/rules'));
 app.use('/api/users', require('./routes/users'));
+app.use('/api/pep',   require('./routes/pep'));
 
 // Health check
 app.get('/api/health', (req, res) => {
@@ -76,13 +77,27 @@ app.use((err, req, res, next) => {
 const PORT = process.env.API_PORT || 5000;
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`Sanctions Engine API running on port ${PORT}`);
-  // Load all sanctions entries into RAM for fast in-memory screening
+
+  // ── Load sanctions entries into RAM ──────────────────────────────────────
   try {
     const sanctionsEngine = require('./services/sanctionsEngine');
     const result = await sanctionsEngine.loadEntries();
-    console.log(`[Startup] In-memory engine ready: ${result.count.toLocaleString()} entries loaded in ${result.elapsed}ms`);
+    console.log(`[Startup] Sanctions engine ready: ${result.count.toLocaleString()} entries loaded in ${result.elapsed}ms`);
   } catch (err) {
-    console.error('[Startup] In-memory engine load failed (will use DB fallback):', err.message);
+    console.error('[Startup] Sanctions engine load failed (will use DB fallback):', err.message);
+  }
+
+  // ── Load PEP entries into RAM (non-blocking — runs in background) ─────────
+  try {
+    const pepEngine = require('./services/pepEngine');
+    console.log('[Startup] PEP engine loading in background (700k+ records)...');
+    pepEngine.loadEntries().then(result => {
+      console.log(`[Startup] PEP engine ready: ${result.count.toLocaleString()} entries loaded in ${result.elapsed}ms`);
+    }).catch(err => {
+      console.error('[Startup] PEP engine load failed:', err.message);
+    });
+  } catch (err) {
+    console.error('[Startup] PEP engine init failed:', err.message);
   }
   // Load PEP data: populate pep_entries_mem (SQL Server In-Memory OLTP) from
   // pep_entries (disk), then build the Node.js RAM index for fast screening.
