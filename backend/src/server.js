@@ -52,19 +52,33 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), service: 'Sanctions Engine API' });
 });
 
-// Serve React frontend - no caching to prevent stale chunk issues
+// Serve React frontend
+// Strategy: hashed asset files (JS/CSS) get long-term cache; index.html never cached.
+// This prevents stale chunk errors when a new build is deployed.
 const frontendBuild = path.join(__dirname, '../../frontend/dist');
 app.use(express.static(frontendBuild, {
-  etag: false,
-  lastModified: false,
-  setHeaders: (res) => {
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
+  etag: true,
+  lastModified: true,
+  setHeaders: (res, filePath) => {
+    // index.html must never be cached — it references hashed chunk filenames
+    if (filePath.endsWith('index.html')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    } else if (/\/assets\/[^/]+-[A-Za-z0-9_-]{8,}\.(js|css)$/.test(filePath)) {
+      // Hashed JS/CSS chunks are immutable — safe to cache for 1 year
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    } else {
+      // Other static files (fonts, images) — moderate cache
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+    }
   }
 }));
 app.get('/{*path}', (req, res) => {
+  // SPA fallback — always serve fresh index.html
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   res.sendFile(path.join(frontendBuild, 'index.html'));
 });
 
