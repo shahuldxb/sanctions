@@ -44,20 +44,15 @@ const ScreeningAll = lazy(() => import('./pages/screening/ScreeningAll'))
 const ScreeningHistory = lazy(() => import('./pages/screening/ScreeningHistory'))
 const Cases = lazy(() => import('./pages/Cases'))
 const Alerts = lazy(() => import('./pages/Alerts'))
-const Customers = lazy(() => import('./pages/banking/Customers'))
-const Accounts = lazy(() => import('./pages/banking/Accounts'))
-const Assets = lazy(() => import('./pages/banking/Assets'))
-const Liabilities = lazy(() => import('./pages/banking/Liabilities'))
-const Transactions = lazy(() => import('./pages/banking/Transactions'))
-const TradeFinance = lazy(() => import('./pages/TradeFinance'))
-const Vessels = lazy(() => import('./pages/Vessels'))
-const Countries = lazy(() => import('./pages/Countries'))
+
 const Watchlist = lazy(() => import('./pages/Watchlist'))
 const Rules = lazy(() => import('./pages/Rules'))
 const Users = lazy(() => import('./pages/Users'))
 const Reports = lazy(() => import('./pages/Reports'))
 const AuditLog = lazy(() => import('./pages/AuditLog'))
 const ScraperControl = lazy(() => import('./pages/process/ScraperControl'))
+const SanctionsListManager = lazy(() => import('./pages/process/SanctionsListManager'))
+const PEPManager = lazy(() => import('./pages/process/PEPManager'))
 const OFACDelta = lazy(() => import('./pages/process/OFACDelta'))
 const EnrichmentEngine = lazy(() => import('./pages/process/EnrichmentEngine'))
 const FuzzyEngine = lazy(() => import('./pages/process/FuzzyEngine'))
@@ -114,20 +109,12 @@ export default function App() {
               <Route path="/cases" element={<Cases />} />
               <Route path="/alerts" element={<Alerts />} />
 
-              {/* Core Banking */}
-              <Route path="/customers" element={<Customers />} />
-              <Route path="/accounts" element={<Accounts />} />
-              <Route path="/assets" element={<Assets />} />
-              <Route path="/liabilities" element={<Liabilities />} />
-              <Route path="/transactions" element={<Transactions />} />
 
-              {/* Trade Finance */}
-              <Route path="/trade-finance" element={<TradeFinance />} />
-              <Route path="/vessels" element={<Vessels />} />
-              <Route path="/countries" element={<Countries />} />
 
               {/* Process Control */}
               <Route path="/process/scraper" element={<ScraperControl />} />
+              <Route path="/process/sanctions-manager" element={<SanctionsListManager />} />
+              <Route path="/process/pep-manager" element={<PEPManager />} />
               <Route path="/process/ofac-delta" element={<OFACDelta />} />
               <Route path="/process/enrichment" element={<EnrichmentEngine />} />
               <Route path="/process/fuzzy" element={<FuzzyEngine />} />

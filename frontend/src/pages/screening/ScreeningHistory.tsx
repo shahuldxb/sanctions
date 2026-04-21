@@ -106,7 +106,7 @@ export default function ScreeningHistory() {
               : data.length === 0 ? <tr><td colSpan={9}><Empty message="No screening history yet" /></td></tr>
               : data.map((row: any) => (
                 <tr key={row.id}>
-                  <td className="font-medium text-white">{row.subject_name}</td>
+                  <td className="font-medium text-white">{row.subject_names || row.subject_name || '—'}</td>
                   <td><Badge value={row.subject_type || 'INDIVIDUAL'} /></td>
                   <td><Badge value={row.overall_result} /></td>
                   <td className="text-center">{row.match_count || 0}</td>
@@ -136,7 +136,7 @@ export default function ScreeningHistory() {
         {selected && (
           <div className="p-6">
             <div className="grid grid-cols-3 gap-4 mb-6">
-              <div className="bg-slate-800/60 rounded-xl p-4"><div className="text-xs text-slate-400 mb-1">Subject</div><div className="font-semibold text-white">{selected.subject_name}</div></div>
+              <div className="bg-slate-800/60 rounded-xl p-4"><div className="text-xs text-slate-400 mb-1">Subject</div><div className="font-semibold text-white">{selected.subject_names || selected.subject_name || '—'}</div></div>
               <div className="bg-slate-800/60 rounded-xl p-4"><div className="text-xs text-slate-400 mb-1">Result</div><Badge value={selected.overall_result} /></div>
               <div className="bg-slate-800/60 rounded-xl p-4"><div className="text-xs text-slate-400 mb-1">Screened</div><div className="text-sm text-slate-200">{selected.started_at ? new Date(selected.started_at).toLocaleString() : '—'}</div></div>
             </div>

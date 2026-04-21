@@ -10,7 +10,7 @@ const config = {
     encrypt: false,
     trustServerCertificate: true,
     enableArithAbort: true,
-    requestTimeout: 60000,
+    requestTimeout: 300000,   // 5 min — needed for large batch INSERT...SELECT (700K rows)
     connectionTimeout: 30000
   },
   pool: {

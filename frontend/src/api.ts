@@ -1,6 +1,6 @@
 import axios from 'axios'
 
-export const api = axios.create({ baseURL: '/api', timeout: 30000 })
+export const api = axios.create({ baseURL: '/api', timeout: 90000 })
 const scraperApi = axios.create({ baseURL: '/scraper', timeout: 300000 })
 
 api.interceptors.response.use(r => r, err => {
@@ -24,7 +24,8 @@ export const deleteSanctionEntry = (id: number) => api.delete(`/sanctions/${id}`
 
 // ── Screening ──────────────────────────────────────────────────────────────
 export const screenSubject = (d: any) => api.post('/screening/screen', d)
-export const getScreeningRequests = (p?: any) => api.get('/screening', { params: p })
+export const screenPEP = (d: any) => api.post('/pep/screen', d)
+export const getScreeningRequests = (p?: any) => api.get('/screening/history', { params: p })
 export const getScreeningRequest = (id: number) => api.get(`/screening/${id}`)
 export const getScreeningMatches = (reqId: number) => api.get(`/screening/${reqId}/matches`)
 export const updateMatch = (id: number, d: any) => api.put(`/screening/matches/${id}`, d)
@@ -141,6 +142,10 @@ export const aiChat = (d: any) => api.post('/ai/chat', d)
 export const aiNarrative = (d: any) => api.post('/ai/generate-narrative', d)
 export const aiTransliterate = (d: any) => api.post('/ai/transliterate', d)
 export const aiRiskAssessment = (d: any) => api.post('/ai/risk-assessment', d)
+export const getAISessions = (p?: any) => api.get('/ai/sessions', { params: p })
+export const getAISessionMessages = (id: number) => api.get(`/ai/sessions/${id}/messages`)
+export const deleteAISession = (id: number) => api.delete(`/ai/sessions/${id}`)
+export const submitAIFeedback = (msgId: number, score: number, note?: string) => api.patch(`/ai/messages/${msgId}/feedback`, { score, note })
 
 // ── Scraper ───────────────────────────────────────────────────────────────
 export const getScraperStatus = () => api.get('/scraper/status')

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react'
+import React, { useEffect, useState, useRef } from 'react'
 import { api } from '../../api'
 import { Badge, Spinner, PageHeader, StatCard, ProgressBar, Field } from '../../components/ui'
 import { SetPageHelp } from '../../components/HelpOverlay'
@@ -11,25 +11,29 @@ const PAGE_META = {
     name: 'scraper_runs', description: 'Sanctions list scraper execution history and live monitoring',
     fields: [
       { name: 'source_code', type: 'varchar(20)', description: 'Source: OFAC | EU | UN | UK | SECO | DFAT | MAS' },
-      { name: 'status', type: 'enum', description: 'RUNNING | SUCCESS | FAILED' },
+      { name: 'run_type', type: 'enum', description: 'FULL | DELTA | SCHEDULED' },
+      { name: 'status', type: 'enum', description: 'RUNNING | COMPLETED | FAILED | SCHEDULED' },
       { name: 'records_added', type: 'int', description: 'New records added in this run' },
       { name: 'records_updated', type: 'int', description: 'Records updated in this run' },
+      { name: 'records_deleted', type: 'int', description: 'Records removed in this run' },
       { name: 'duration_seconds', type: 'int', description: 'Run duration in seconds' },
+      { name: 'error_message', type: 'text', description: 'Error details if failed' },
     ]
   }]
 }
 
 const SOURCES = [
-  { code: 'OFAC', name: 'OFAC SDN',           flag: '🇺🇸' },
-  { code: 'EU',   name: 'EU Sanctions',        flag: '🇪🇺' },
-  { code: 'UN',   name: 'UN Security Council', flag: '🇺🇳' },
-  { code: 'UK',   name: 'UK OFSI',             flag: '🇬🇧' },
-  { code: 'SECO', name: 'SECO Switzerland',    flag: '🇨🇭' },
-  { code: 'DFAT', name: 'DFAT Australia',      flag: '🇦🇺' },
-  { code: 'MAS',  name: 'MAS Singapore',       flag: '🇸🇬' },
-  { code: 'BIS',  name: 'BIS Entity List',     flag: '🇺🇸' },
+  { code: 'OFAC', name: 'OFAC SDN', flag: '🇺🇸', url: 'https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.CSV' },
+  { code: 'EU',   name: 'EU Sanctions', flag: '🇪🇺', url: 'https://webgate.ec.europa.eu/fsd/fsf' },
+  { code: 'UN',   name: 'UN Security Council', flag: '🇺🇳', url: 'https://scsanctions.un.org/resources/xml/en/consolidated.xml' },
+  { code: 'UK',   name: 'UK OFSI', flag: '🇬🇧', url: 'https://sanctionslist.fcdo.gov.uk/docs/UK-Sanctions-List.csv' },
+  { code: 'SECO', name: 'SECO Switzerland', flag: '🇨🇭', url: 'https://www.seco.admin.ch/seco/en/home/Aussenwirtschaftspolitik_Wirtschaftliche_Zusammenarbeit/Wirtschaftsbeziehungen/exportkontrollen-und-sanktionen/sanktionen-embargos/sanktionsmassnahmen.html' },
+  { code: 'DFAT', name: 'DFAT Australia', flag: '🇦🇺', url: 'https://www.dfat.gov.au/international-relations/security/sanctions/consolidated-list' },
+  { code: 'MAS',  name: 'MAS Singapore', flag: '🇸🇬', url: 'https://www.mas.gov.sg/api/v1/lists/Terrorist-Designation' },
+  { code: 'BIS',  name: 'BIS Entity List', flag: '🇺🇸', url: 'https://www.bis.doc.gov/index.php/policy-guidance/lists-of-parties-of-concern/entity-list' },
 ]
 
+/** Format seconds as "1m 23s" or "45s" */
 function fmtElapsed(sec: number | null | undefined): string {
   if (sec == null || sec < 0) return '—'
   if (sec < 60) return `${sec}s`
@@ -38,26 +42,7 @@ function fmtElapsed(sec: number | null | undefined): string {
   return s > 0 ? `${m}m ${s}s` : `${m}m`
 }
 
-/** Format UTC ISO string as IST date+time */
-function toIST(iso: string | null | undefined): string {
-  if (!iso) return 'Never'
-  return new Date(iso).toLocaleString('en-IN', {
-    timeZone: 'Asia/Kolkata',
-    day: '2-digit', month: 'short', year: 'numeric',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-    hour12: true,
-  })
-}
-
-/** Current IST time string for log prefixes */
-function nowIST(): string {
-  return new Date().toLocaleTimeString('en-IN', {
-    timeZone: 'Asia/Kolkata',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-    hour12: true,
-  })
-}
-
+/** Live ticking elapsed timer hook — returns seconds since startedAt */
 function useLiveTimer(startedAt: string | null): number {
   const [elapsed, setElapsed] = useState(0)
   useEffect(() => {
@@ -70,6 +55,7 @@ function useLiveTimer(startedAt: string | null): number {
   return elapsed
 }
 
+/** Live IST clock card for the top stat row */
 function LiveClockCard() {
   const [now, setNow] = useState(() => new Date())
   useEffect(() => {
@@ -86,6 +72,7 @@ function LiveClockCard() {
   )
 }
 
+/** Individual source card with its own live timer */
 function SourceCard({ src, st, isRunning, onRun, onStop, onToggleLogs, showingLogs }: {
   src: typeof SOURCES[0]
   st: any
@@ -97,21 +84,27 @@ function SourceCard({ src, st, isRunning, onRun, onStop, onToggleLogs, showingLo
 }) {
   const liveElapsed = useLiveTimer(isRunning ? (st.run_started_at || null) : null)
 
-  const statusLabel = isRunning ? '● RUNNING' : (st.last_run_status || 'IDLE')
+  // Determine elapsed to display
+  const displayElapsed = isRunning
+    ? liveElapsed
+    : (st.last_elapsed_seconds ?? null)
+
   const statusColor = isRunning
     ? 'text-blue-400'
     : st.last_run_status === 'SUCCESS' ? 'text-green-400'
-    : st.last_run_status === 'FAILED'  ? 'text-red-400'
+    : st.last_run_status === 'FAILED' ? 'text-red-400'
     : 'text-slate-400'
+
   const cardBorder = isRunning
     ? 'border-blue-500/60 bg-blue-900/5'
-    : st.last_run_status === 'FAILED'  ? 'border-red-600/40'
+    : st.last_run_status === 'FAILED' ? 'border-red-600/40'
     : st.last_run_status === 'SUCCESS' ? 'border-green-600/30'
     : 'border-slate-700'
 
   return (
     <div className={`card border transition-all ${cardBorder}`}>
       <div className="p-4">
+        {/* Header row */}
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
             <span className="text-xl">{src.flag}</span>
@@ -130,42 +123,65 @@ function SourceCard({ src, st, isRunning, onRun, onStop, onToggleLogs, showingLo
             </button>
           )}
         </div>
+
+        {/* Progress bar when running */}
         {isRunning && <ProgressBar pct={st.progress || 0} label={`${st.progress || 0}%`} />}
+
+        {/* Stats grid */}
         <div className="grid grid-cols-2 gap-x-3 gap-y-2 mt-2 text-xs">
+          {/* Status */}
           <div>
             <div className="text-slate-500 mb-0.5">Status</div>
-            <div className={`font-medium ${statusColor}`}>{statusLabel}</div>
-          </div>
-          <div>
-            <div className="text-slate-500 mb-0.5 flex items-center gap-1"><Timer size={9} /> Elapsed</div>
-            <div className={`font-mono font-semibold ${isRunning ? 'text-blue-300 animate-pulse' : 'text-slate-300'}`}>
-              {isRunning ? fmtElapsed(liveElapsed) : fmtElapsed(st.last_elapsed_seconds)}
+            <div className={`font-medium ${statusColor}`}>
+              {isRunning ? '● RUNNING' : st.last_run_status || 'IDLE'}
             </div>
           </div>
+
+          {/* Elapsed time — the key new field */}
+          <div>
+            <div className="text-slate-500 mb-0.5 flex items-center gap-1">
+              <Timer size={9} /> Elapsed
+            </div>
+            <div className={`font-mono font-semibold ${isRunning ? 'text-blue-300 animate-pulse' : 'text-slate-300'}`}>
+              {isRunning
+                ? fmtElapsed(liveElapsed)
+                : fmtElapsed(st.last_elapsed_seconds)}
+            </div>
+          </div>
+
+          {/* Records */}
           <div>
             <div className="text-slate-500 mb-0.5">Records</div>
             <div className="text-slate-300">
-              {(st.total_entries ?? st.last_records)?.toLocaleString() || '—'}
+              {st.total_entries?.toLocaleString() || st.last_records?.toLocaleString() || '—'}
             </div>
           </div>
+
+          {/* Last Run */}
           <div>
             <div className="text-slate-500 mb-0.5">Last Run</div>
-            <div className="text-slate-400 text-[10px] leading-tight">
-              {st.last_run_at ? toIST(st.last_run_at) : 'Never'}
+            <div className="text-slate-400">
+              {st.last_run_at
+                ? new Date(st.last_run_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
+                : 'Never'}
             </div>
           </div>
         </div>
-        {!isRunning && st.last_run_status === 'FAILED' && st.error_message && (
+
+        {/* Error message */}
+        {st.error_message && (
           <div className="mt-2 flex items-start gap-1 text-xs text-red-300 bg-red-900/20 rounded p-1.5">
             <AlertCircle size={10} className="mt-0.5 shrink-0" />
             <span className="truncate">{st.error_message}</span>
           </div>
         )}
+
+        {/* Logs toggle */}
         <button
           onClick={onToggleLogs}
           className={`mt-2 text-xs flex items-center gap-1 transition-colors ${showingLogs ? 'text-blue-400' : 'text-slate-500 hover:text-blue-400'}`}
         >
-          <Terminal size={10} /> {showingLogs ? 'Hide Logs' : 'Show Logs'}
+          <Terminal size={10} /> {showingLogs ? 'Hide Logs' : 'Logs'}
         </button>
       </div>
     </div>
@@ -173,133 +189,138 @@ function SourceCard({ src, st, isRunning, onRun, onStop, onToggleLogs, showingLo
 }
 
 export default function ScraperControl() {
-  const [statuses, setStatuses]         = useState<any[]>([])
-  const [history, setHistory]           = useState<any[]>([])
-  const [running, setRunning]           = useState<Record<string, boolean>>({})
+  const [statuses, setStatuses] = useState<any[]>([])
+  const [history, setHistory] = useState<any[]>([])
+  const [running, setRunning] = useState<Record<string, boolean>>({})
   const [runStartedAt, setRunStartedAt] = useState<Record<string, string>>({})
-  const [liveLog, setLiveLog]           = useState<string[]>([])
+  const [liveLog, setLiveLog] = useState<string[]>([])
   const [activeSource, setActiveSource] = useState<string | null>(null)
-  const [connected, setConnected]       = useState(false)
-  const [mode, setMode]                 = useState('full')
+  const [connected, setConnected] = useState(false)
+  const [mode, setMode] = useState('full')
   const logRef = useRef<HTMLDivElement>(null)
-  const esRef  = useRef<EventSource | null>(null)
+  const esRef = useRef<EventSource | null>(null)
 
-  const loadStatus = useCallback(async () => {
+  const loadStatus = async () => {
     try {
       const r = await api.get('/scraper/status')
-      const data: any[] = Array.isArray(r.data) ? r.data : Object.values(r.data || {})
-      setStatuses(data)
+      setStatuses(Array.isArray(r.data) ? r.data : Object.values(r.data || {}))
     } catch { }
-  }, [])
+  }
 
-  const loadHistory = useCallback(async () => {
+  const loadHistory = async () => {
     try {
       const r = await api.get('/scraper/history')
       setHistory(r.data?.data || r.data || [])
     } catch { }
-  }, [])
+  }
 
   useEffect(() => {
     loadStatus(); loadHistory()
     const iv = setInterval(() => { loadStatus(); loadHistory() }, 8000)
     return () => clearInterval(iv)
-  }, [loadStatus, loadHistory])
+  }, [])
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
   }, [liveLog])
 
   const runScraper = async (code: string) => {
-    // Open log panel immediately so user sees output right away
-    setActiveSource(code)
-    setLiveLog([`[${nowIST()}] Starting ${code} scraper (${mode} mode)...`])
-    setConnected(false)
-
     const startedAt = new Date().toISOString()
     setRunning(p => ({ ...p, [code]: true }))
     setRunStartedAt(p => ({ ...p, [code]: startedAt }))
-
-    // Zeroise records and stamp Last Run immediately
-    setStatuses(prev => prev.map(s => s.source_code === code
+    setActiveSource(code)
+    setLiveLog([`[${new Date().toLocaleTimeString()}] Starting ${code} scraper (${mode} mode)...`])
+    if (esRef.current) esRef.current.close()
+    // Immediately zeroise Records and stamp Last Run with current time
+    setStatuses(p => p.map(s => s.source_code === code
       ? { ...s, total_entries: 0, last_records: 0, last_run_at: startedAt, last_run_status: 'RUNNING', progress: 0 }
-      : s
-    ))
-
-    // Cancel any previous poll
-    if ((esRef as any).current?.stopPoll) (esRef as any).current.stopPoll()
+      : s))
 
     try {
       const triggerRes = await api.post(`/scraper/trigger/${code}`, { mode })
-      const runId: string = triggerRes.data?.runId || code
-
-      setLiveLog(prev => [...prev, `[${nowIST()}] Connected — polling log for run ${runId}...`])
+      const runId = triggerRes.data?.runId || code
+      const es = new EventSource(`/api/scraper/stream/${runId}`)
+      esRef.current = es
       setConnected(true)
 
-      // POLLING instead of SSE — tunnel proxies buffer SSE so events never arrive live
-      let seenCount = 0
-      let active = true
-      const poll = async () => {
-        if (!active) return
+      es.onmessage = (e: MessageEvent) => {
+        if (!e.data || e.data.startsWith(':')) return
         try {
-          const r = await api.get(`/scraper/logs/${runId}?since=${seenCount}`)
-          const data = r.data
-          if (data.logs?.length) {
-            const newLines = data.logs.map((l: any) => {
+          const d = JSON.parse(e.data)
+          const ts = new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: true })
+
+          if (d.type === 'state') {
+            // Replay all buffered logs from before SSE client connected
+            const buffered: string[] = (d.logs || []).map((l: any) => {
               const t = new Date(l.ts).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: true })
               return `[${t}] ${l.msg}`
             })
-            setLiveLog(p => [...p, ...newLines].slice(-500))
-            seenCount = data.total
-          }
-          if (data.progress !== undefined) {
-            setStatuses(p => p.map(s => s.source_code === code ? { ...s, progress: data.progress } : s))
-          }
-          if (data.done) {
-            active = false
+            if (buffered.length > 0) {
+              setLiveLog(prev => {
+                const existing = new Set(prev)
+                const fresh = buffered.filter((b: string) => !existing.has(b))
+                return [...prev, ...fresh]
+              })
+            }
+            // If scrape already finished, mark complete
+            if (d.progress >= 100 || d.status === 'done' || d.status === 'complete') {
+              setRunning(p => ({ ...p, [code]: false }))
+              setConnected(false)
+              es.close()
+              loadStatus(); loadHistory()
+            }
+
+          } else if (d.type === 'log') {
+            const msg = d.msg || d.message || ''
+            if (msg) setLiveLog(p => [...p.slice(-300), `[${ts}] ${msg}`])
+
+          } else if (d.type === 'progress') {
+            setStatuses(p => p.map(s => s.source_code === code ? { ...s, progress: d.progress } : s))
+            const msg = d.message || d.msg || ''
+            if (msg) setLiveLog(p => [...p.slice(-300), `[${ts}] ${msg}`])
+
+          } else if (d.type === 'complete') {
             const elapsed = Math.round((Date.now() - new Date(startedAt).getTime()) / 1000)
             setStatuses(p => p.map(s => s.source_code === code
               ? { ...s, last_run_status: 'SUCCESS', progress: 100, last_elapsed_seconds: elapsed, last_run_at: new Date().toISOString() }
-              : s
-            ))
+              : s))
+            setLiveLog(p => [...p, `[${ts}] ✓ COMPLETE — +${d.added} added, ~${d.updated} updated in ${fmtElapsed(d.duration || elapsed)}`])
             setRunning(p => ({ ...p, [code]: false }))
             setConnected(false)
-            toast.success(`${code} complete`)
+            es.close()
+            toast.success(`${code} complete: ${d.added} records added (${fmtElapsed(d.duration || elapsed)})`)
             loadStatus(); loadHistory()
-            return
-          }
-        } catch { /* ignore transient poll errors */ }
-        if (active) setTimeout(poll, 1500)
-      }
-      setTimeout(poll, 800) // first poll after 0.8s
-      ;(esRef as any).current = { stopPoll: () => { active = false } }
 
-    } catch (err: any) {
-      setLiveLog(p => [...p, `[${nowIST()}] Failed to start: ${err.message}`])
-      toast.error(`Failed to start ${code}: ${err.message}`)
+          } else if (d.type === 'error') {
+            const errMsg = d.message || d.msg || 'Unknown error'
+            setLiveLog(p => [...p, `[${ts}] ✗ ERROR: ${errMsg}`])
+            setRunning(p => ({ ...p, [code]: false }))
+            setConnected(false)
+            es.close()
+            toast.error(`${code} failed: ${errMsg}`)
+            loadStatus()
+          }
+        } catch (parseErr) {
+          // log parse errors to the live log so they are visible
+          const ts = new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: true })
+          setLiveLog(p => [...p, `[${ts}] ⚠ Parse error: ${String(parseErr)}`])
+        }
+      }
+      es.onerror = () => {
+        const ts = new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: true })
+        setLiveLog(p => [...p, `[${ts}] ⚠ SSE connection error — check server`])
+        setConnected(false)
+        // Don't close — EventSource auto-reconnects; only close if no longer running
+        if (!running[code]) es.close()
+      }
+    } catch (e: any) {
+      toast.error(`Failed: ${e.message}`)
       setRunning(p => ({ ...p, [code]: false }))
-      setStatuses(prev => prev.map(s => s.source_code === code
-        ? { ...s, last_run_status: 'FAILED', progress: 0 }
-        : s
-      ))
     }
   }
 
-  const stopScraper = async (code: string) => {
-    if ((esRef as any).current?.stopPoll) (esRef as any).current.stopPoll()
-    ;(esRef as any).current = null
-    await api.post(`/scraper/stop/${code}`).catch(() => { })
-    setRunning(p => ({ ...p, [code]: false }))
-    setConnected(false)
-    setStatuses(prev => prev.map(s => s.source_code === code
-      ? { ...s, last_run_status: 'STOPPED', progress: 0 }
-      : s
-    ))
-    setLiveLog(p => [...p, `[${nowIST()}] Scraper stopped by user`])
-    toast('Scraper stopped')
-  }
-
   const runAll = async () => {
-    setLiveLog([`[${nowIST()}] Starting ALL scrapers sequentially...`])
+    setLiveLog([`[${new Date().toLocaleTimeString()}] Starting ALL scrapers sequentially...`])
     for (const src of SOURCES) {
       if (!running[src.code]) {
         await runScraper(src.code)
@@ -308,6 +329,15 @@ export default function ScraperControl() {
     }
   }
 
+  const stopScraper = async (code: string) => {
+    if (esRef.current) esRef.current.close()
+    await api.post(`/scraper/stop/${code}`).catch(() => { })
+    setRunning(p => ({ ...p, [code]: false }))
+    setConnected(false)
+    toast('Scraper stopped')
+  }
+
+  // Build a lookup map from the statuses array
   const statusMap: Record<string, any> = {}
   statuses.forEach(s => { statusMap[s.source_code] = s })
 
@@ -338,6 +368,7 @@ export default function ScraperControl() {
         </>}
       />
 
+      {/* Summary stats */}
       <div className="grid grid-cols-4 gap-4 mb-6">
         <StatCard label="Sources" value={totalSources} />
         <StatCard label="Running" value={totalRunning} color="text-blue-400" />
@@ -349,10 +380,12 @@ export default function ScraperControl() {
         <LiveClockCard />
       </div>
 
+      {/* Source cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         {SOURCES.map(src => {
           const st = statusMap[src.code] || {}
-          const isRunning = !!running[src.code]
+          const isRunning = running[src.code] || false
+          // Inject live run_started_at so the card timer can tick
           const enrichedSt = isRunning ? { ...st, run_started_at: runStartedAt[src.code] } : st
           return (
             <SourceCard
@@ -369,49 +402,41 @@ export default function ScraperControl() {
         })}
       </div>
 
+      {/* Live Log */}
       {activeSource && (
         <div className="card mb-6">
           <div className="card-header flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Terminal size={14} className="text-green-400" />
-              <span className="font-semibold text-white text-sm">Live Log — {activeSource}</span>
-              {connected ? (
+              <span className="font-semibold text-white text-sm">Live Log: {activeSource}</span>
+              {connected && (
                 <span className="flex items-center gap-1 text-xs text-green-400 animate-pulse">
                   <span className="w-1.5 h-1.5 bg-green-400 rounded-full" /> LIVE
                 </span>
-              ) : (
-                <span className="flex items-center gap-1 text-xs text-slate-500">
-                  <span className="w-1.5 h-1.5 bg-slate-500 rounded-full" /> IDLE
-                </span>
               )}
             </div>
-            <div className="flex items-center gap-2">
-              <button onClick={() => setLiveLog([])} className="text-xs text-slate-500 hover:text-amber-400">Clear</button>
-              <button onClick={() => setActiveSource(null)} className="text-xs text-slate-500 hover:text-white">Close</button>
-            </div>
+            <button onClick={() => setActiveSource(null)} className="text-xs text-slate-500 hover:text-white">Close</button>
           </div>
           <div
             ref={logRef}
-            className="font-mono text-xs bg-black/50 rounded-b p-3 h-56 overflow-y-auto"
+            className="font-mono text-xs bg-black/40 rounded-b p-3 h-48 overflow-y-auto space-y-0.5"
           >
-            {liveLog.length === 0 ? (
-              <div className="text-slate-600 italic">Waiting for log output...</div>
-            ) : (
-              liveLog.map((line, i) => (
+            {liveLog.length === 0
+              ? <div className="text-slate-600">No log output yet.</div>
+              : liveLog.map((line, i) => (
                 <div key={i} className={
-                  line.includes('COMPLETE') ? 'text-green-400'
-                  : line.includes('ERROR') || line.includes('Failed') ? 'text-red-400'
-                  : line.includes('WARN') || line.includes('dropped') ? 'text-amber-300'
-                  : line.includes('Starting') || line.includes('Stream') ? 'text-blue-300'
+                  line.includes('✓') ? 'text-green-400'
+                  : line.includes('✗') || line.includes('ERROR') ? 'text-red-400'
+                  : line.includes('WARN') ? 'text-amber-300'
                   : 'text-green-300'
                 }>{line}</div>
-              ))
-            )}
-            {connected && <div className="animate-pulse text-green-700 mt-1">|</div>}
+              ))}
+            <div className="animate-pulse text-green-700">▌</div>
           </div>
         </div>
       )}
 
+      {/* Run History */}
       <div className="card">
         <div className="card-header">
           <span className="font-semibold text-white">Scraper Run History</span>
@@ -428,7 +453,7 @@ export default function ScraperControl() {
                 <th>Updated</th>
                 <th>Deleted</th>
                 <th className="flex items-center gap-1"><Timer size={11} /> Elapsed</th>
-                <th>Started (IST)</th>
+                <th>Started</th>
                 <th>Error</th>
               </tr>
             </thead>
@@ -446,7 +471,7 @@ export default function ScraperControl() {
                   <td className="text-xs font-mono font-semibold text-slate-300">
                     {row.duration_seconds != null ? fmtElapsed(row.duration_seconds) : '—'}
                   </td>
-                  <td className="text-xs text-slate-400">{row.started_at ? toIST(row.started_at) : '—'}</td>
+                  <td className="text-xs text-slate-500">{row.started_at ? new Date(row.started_at).toLocaleString() : '—'}</td>
                   <td className="text-xs text-red-400 max-w-[150px] truncate">{row.error_message || '—'}</td>
                 </tr>
               ))}

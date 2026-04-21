@@ -39,6 +39,7 @@ app.use('/api/watchlist', require('./routes/watchlist'));
 app.use('/api/alerts', require('./routes/alerts'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/scraper', require('./routes/scraper'));
+app.use('/api/pep', require('./routes/pep'));
 app.use('/api/ai', require('./routes/ai'));
 app.use('/api/audit', require('./routes/audit'));
 app.use('/api/dashboard', require('./routes/dashboard'));
@@ -82,6 +83,20 @@ app.listen(PORT, '0.0.0.0', async () => {
     console.log(`[Startup] In-memory engine ready: ${result.count.toLocaleString()} entries loaded in ${result.elapsed}ms`);
   } catch (err) {
     console.error('[Startup] In-memory engine load failed (will use DB fallback):', err.message);
+  }
+  // Load PEP data: populate pep_entries_mem (SQL Server In-Memory OLTP) from
+  // pep_entries (disk), then build the Node.js RAM index for fast screening.
+  try {
+    const { loadPEPIntoMemTable } = require('./services/pepMemLoader');
+    const { loadPEPs } = require('./services/pepEngine');
+    console.log('[Startup] Loading PEP data into SQL Server In-Memory table (pep_entries_mem)...');
+    const memResult = await loadPEPIntoMemTable();
+    console.log(`[Startup] pep_entries_mem ready: ${memResult.rowCount.toLocaleString()} rows in ${(memResult.durationMs/1000).toFixed(1)}s`);
+    console.log('[Startup] Building PEP RAM index from pep_entries_mem...');
+    const pepResult = await loadPEPs();
+    console.log(`[Startup] PEP RAM index ready: ${pepResult.count.toLocaleString()} entries in ${pepResult.elapsed}ms`);
+  } catch (err) {
+    console.error('[Startup] PEP load failed (screening unavailable until /api/pep/load is called):', err.message);
   }
 });
 

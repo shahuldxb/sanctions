@@ -15,6 +15,8 @@
 'use strict';
 
 const { query } = require('../db/connection');
+const { doubleMetaphone } = require('double-metaphone');
+const redisCache = require('./redisCache'); // D — Redis cache
 
 // ── List priority order (compliance standard) ─────────────────────────────────
 const LIST_PRIORITY = ['OFAC', 'UN', 'EU', 'UK', 'SECO', 'BIS', 'DFAT', 'MAS'];
@@ -22,6 +24,7 @@ const LIST_PRIORITY = ['OFAC', 'UN', 'EU', 'UK', 'SECO', 'BIS', 'DFAT', 'MAS'];
 // ── Engine state ──────────────────────────────────────────────────────────────
 let _entries        = new Map();   // entry_id → entry object
 let _tokenIndex     = new Map();   // token → Set of entry_ids
+let _phoneticIndex  = new Map();   // metaphone_code → Set of entry_ids (B: phonetic index)
 let _loadedAt       = null;
 let _entryCount     = 0;
 let _isLoading      = false;
@@ -39,6 +42,25 @@ function tokenize(name) {
     .replace(/[^A-Z0-9\s]/g, ' ')   // replace punctuation with space
     .split(/\s+/)
     .filter(t => t.length >= 2);    // drop single-char tokens
+}
+
+/**
+ * B — Double Metaphone phonetic codes for a name.
+ * "Gaddafi" and "Qaddafi" both → ["KTF","KTF"]
+ * Returns array of unique non-empty codes.
+ */
+function phoneticCodes(name) {
+  if (!name) return [];
+  const tokens = tokenize(name);
+  const codes = new Set();
+  for (const tok of tokens) {
+    try {
+      const [primary, secondary] = doubleMetaphone(tok);
+      if (primary)   codes.add(primary);
+      if (secondary) codes.add(secondary);
+    } catch (_) {}
+  }
+  return [...codes];
 }
 
 // ── Levenshtein similarity (0-100) ────────────────────────────────────────────
@@ -119,6 +141,21 @@ async function _doLoad() {
   const t0 = Date.now();
 
   try {
+    // D — Try Redis cache first (instant load, no DB round-trip)
+    const cached = await redisCache.loadIndex();
+    if (cached) {
+      _entries       = new Map(cached.entries.map(e => [e.id, e]));
+      _tokenIndex    = cached.tokenIndex;
+      _phoneticIndex = cached.phoneticIndex;
+      _entryCount    = cached.entryCount;
+      _loadedAt      = new Date();
+      _isLoading     = false;
+      const elapsed  = Date.now() - t0;
+      const memMB    = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+      console.log(`[SanctionsEngine] Restored ${_entryCount.toLocaleString()} entries from Redis cache in ${elapsed}ms | heap: ${memMB}MB`);
+      return { count: _entryCount, loadedAt: _loadedAt, elapsed, source: 'redis' };
+    }
+
     // Load all active entries with source code
     const result = await query(`
       SELECT
@@ -160,6 +197,8 @@ async function _doLoad() {
     const newEntries    = new Map();
     const newTokenIndex = new Map();
 
+    const newPhoneticIndex = new Map();
+
     for (const row of rows) {
       const aliases = aliasMap.get(row.id) || [];
       const entry = {
@@ -188,10 +227,22 @@ async function _doLoad() {
           newTokenIndex.get(token).add(row.id);
         }
       }
+      // B — Phonetic index: primary name + aliases
+      for (const code of phoneticCodes(row.primary_name)) {
+        if (!newPhoneticIndex.has(code)) newPhoneticIndex.set(code, new Set());
+        newPhoneticIndex.get(code).add(row.id);
+      }
+      for (const alias of aliases) {
+        for (const code of phoneticCodes(alias)) {
+          if (!newPhoneticIndex.has(code)) newPhoneticIndex.set(code, new Set());
+          newPhoneticIndex.get(code).add(row.id);
+        }
+      }
     }
 
-    _entries    = newEntries;
-    _tokenIndex = newTokenIndex;
+    _entries       = newEntries;
+    _tokenIndex    = newTokenIndex;
+    _phoneticIndex = newPhoneticIndex;
     _entryCount = newEntries.size;
     _loadedAt   = new Date();
     _isLoading  = false;
@@ -200,7 +251,15 @@ async function _doLoad() {
     const memMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
     console.log(`[SanctionsEngine] Loaded ${_entryCount.toLocaleString()} entries in ${elapsed}ms | heap: ${memMB}MB`);
 
-    return { count: _entryCount, loadedAt: _loadedAt, elapsed };
+    // D — Save to Redis cache for instant future restarts
+    redisCache.saveIndex({
+      entries:       [...newEntries.values()],
+      tokenIndex:    newTokenIndex,
+      phoneticIndex: newPhoneticIndex,
+      entryCount:    _entryCount,
+    }).catch(e => console.error('[SanctionsEngine] Redis save failed:', e.message));
+
+    return { count: _entryCount, loadedAt: _loadedAt, elapsed, source: 'db' };
   } catch (err) {
     _isLoading = false;
     console.error('[SanctionsEngine] Load failed:', err.message);
@@ -252,6 +311,12 @@ function screen(name, opts = {}) {
         }
       }
     }
+  }
+
+  // B — Phonetic candidate expansion: catches Gaddafi/Qaddafi, Mohammed/Muhammad etc.
+  for (const code of phoneticCodes(searchUpper)) {
+    const ids = _phoneticIndex.get(code);
+    if (ids) ids.forEach(id => candidateIds.add(id));
   }
 
   // If very few candidates, broaden search with substring matching on first token

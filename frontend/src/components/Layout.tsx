@@ -1,10 +1,10 @@
 import React, { useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import {
-  Shield, LayoutDashboard, Search, FileText, Users, CreditCard, Building2,
-  AlertTriangle, Globe, Ship, List, Scale, Settings, ChevronDown, ChevronRight,
-  Activity, Database, Bot, RefreshCw, BarChart3, BookOpen, Wallet, TrendingUp,
-  Eye, Bell, Gavel, Menu, X, Layers, Cpu, Zap, Clock, Package
+  Shield, LayoutDashboard, Search, FileText, Users, Building2,
+  AlertTriangle, Globe, List, Scale, Settings, ChevronDown, ChevronRight,
+  Activity, Database, Bot, RefreshCw, BarChart3, BookOpen,
+  Eye, Bell, Gavel, Menu, X, Layers, Cpu, Zap, Clock
 } from 'lucide-react'
 
 interface NavItem {
@@ -20,16 +20,8 @@ const nav: NavItem[] = [
   { label: 'Dashboard', icon: LayoutDashboard, path: '/' },
   {
     label: 'Screening', icon: Search, children: [
-      { label: 'Quick Screen', icon: Zap, path: '/screening/quick' },
+      { label: 'Master Screener', icon: Zap, path: '/screening/quick' },
       { label: 'Batch Screener', icon: Layers, path: '/screening/batch' },
-      { label: 'OFAC SDN Screen', icon: Shield, path: '/screening/ofac', badge: 'LIVE', badgeColor: 'bg-red-600' },
-      { label: 'EU List Screen', icon: Globe, path: '/screening/eu' },
-      { label: 'UN List Screen', icon: Scale, path: '/screening/un' },
-      { label: 'UK OFSI Screen', icon: Building2, path: '/screening/uk' },
-      { label: 'SECO Screen', icon: Shield, path: '/screening/seco' },
-      { label: 'DFAT Screen', icon: Shield, path: '/screening/dfat' },
-      { label: 'MAS Screen', icon: Shield, path: '/screening/mas' },
-      { label: 'All Lists Screen', icon: Layers, path: '/screening/all' },
       { label: 'Screening History', icon: Clock, path: '/screening/history' },
     ]
   },
@@ -42,34 +34,13 @@ const nav: NavItem[] = [
   {
     label: 'Sanctions Lists', icon: List, children: [
       { label: 'All Entries', icon: Database, path: '/sanctions' },
-      { label: 'OFAC SDN', icon: Shield, path: '/sanctions/ofac' },
-      { label: 'EU List', icon: Globe, path: '/sanctions/eu' },
-      { label: 'UN List', icon: Scale, path: '/sanctions/un' },
-      { label: 'UK OFSI', icon: Building2, path: '/sanctions/uk' },
-      { label: 'SECO', icon: Shield, path: '/sanctions/seco' },
-      { label: 'DFAT', icon: Shield, path: '/sanctions/dfat' },
-      { label: 'MAS', icon: Shield, path: '/sanctions/mas' },
       { label: 'Internal Watchlist', icon: Eye, path: '/watchlist' },
     ]
   },
   {
-    label: 'Core Banking', icon: Building2, children: [
-      { label: 'Customers', icon: Users, path: '/customers' },
-      { label: 'Accounts', icon: CreditCard, path: '/accounts' },
-      { label: 'Assets', icon: TrendingUp, path: '/assets' },
-      { label: 'Liabilities', icon: Wallet, path: '/liabilities' },
-      { label: 'Transactions', icon: Activity, path: '/transactions' },
-    ]
-  },
-  {
-    label: 'Trade Finance', icon: Package, children: [
-      { label: 'Letters of Credit', icon: FileText, path: '/trade-finance' },
-      { label: 'Vessels', icon: Ship, path: '/vessels' },
-      { label: 'Countries', icon: Globe, path: '/countries' },
-    ]
-  },
-  {
     label: 'Process Control', icon: Cpu, children: [
+      { label: 'Sanctions List Manager', icon: Database, path: '/process/sanctions-manager' },
+      { label: 'PEP Manager', icon: Users, path: '/process/pep-manager' },
       { label: 'Scraper Control', icon: RefreshCw, path: '/process/scraper' },
       { label: 'OFAC Delta', icon: Zap, path: '/process/ofac-delta' },
       { label: 'Enrichment Engine', icon: Database, path: '/process/enrichment' },

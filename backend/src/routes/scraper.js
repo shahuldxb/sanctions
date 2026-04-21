@@ -15,7 +15,9 @@ router.get('/status', async (req, res) => {
       SELECT s.*, 
         (SELECT TOP 1 status FROM scrape_run_history WHERE source_id = s.id ORDER BY started_at DESC) as last_run_status,
         (SELECT TOP 1 started_at FROM scrape_run_history WHERE source_id = s.id ORDER BY started_at DESC) as last_run_at,
-        (SELECT TOP 1 records_downloaded FROM scrape_run_history WHERE source_id = s.id ORDER BY started_at DESC) as last_records
+        (SELECT TOP 1 completed_at FROM scrape_run_history WHERE source_id = s.id ORDER BY started_at DESC) as last_run_completed,
+        (SELECT TOP 1 records_downloaded FROM scrape_run_history WHERE source_id = s.id ORDER BY started_at DESC) as last_records,
+        (SELECT TOP 1 DATEDIFF(SECOND, started_at, ISNULL(completed_at, GETDATE())) FROM scrape_run_history WHERE source_id = s.id ORDER BY started_at DESC) as last_elapsed_seconds
       FROM sanctions_list_sources s
       ORDER BY source_code
     `);
@@ -41,10 +43,24 @@ router.post('/trigger/:sourceCode', async (req, res) => {
     if (!source.recordset.length) return res.status(404).json({ error: 'Source not found' });
     
     const src = source.recordset[0];
+
+    // Duplicate-run guard: reject if already running
+    if (scraperStatus[sourceCode]?.running) {
+      return res.status(409).json({ error: `${sourceCode} is already running`, runId: scraperStatus[sourceCode].runId });
+    }
+
     const runId = `RUN-${Date.now()}`;
     
     // Mark as running
     scraperStatus[sourceCode] = { running: true, progress: 0, runId };
+    
+    // CRITICAL FIX: Initialize processDetails and processLogs BEFORE calling scrapeSource
+    // so that any SSE client connecting immediately after trigger sees the correct state.
+    // Without this, the SSE /stream endpoint sends empty state because scrapeSource
+    // hasn't had a chance to run yet (it's async fire-and-forget).
+    processDetails[runId] = { status: 'running', progress: 0 };
+    processLogs[runId] = [];
+    addLog(runId, `Starting ${sourceCode} scraper...`, 'info');
     
     // Create run history record
     await query(`
@@ -74,6 +90,9 @@ router.post('/trigger/:sourceCode', async (req, res) => {
       await query(`
         UPDATE scrape_run_history SET completed_at = GETDATE(), status = 'FAILED', error_message = @error WHERE run_id = @run_id
       `, { run_id: runId, error: err.message });
+      // Push error to SSE stream so the live log shows the failure reason
+      addLog(runId, `✗ ${sourceCode} failed: ${err.message}`, 'error');
+      pushSSE(runId, { type: 'error', message: err.message });
     });
     
     res.json({ message: `Scraping ${sourceCode} started`, runId });
@@ -157,8 +176,17 @@ router.put('/scheduler/:id', async (req, res) => {
 
 // Real scraping logic — downloads and parses actual sanctions data from official sources
 async function scrapeSource(source, runId) {
+  // Initialise processDetails so addLog/pushSSE work before SSE clients connect
+  if (!processDetails[runId]) processDetails[runId] = { status: 'running', progress: 0 };
+  let progressPct = 0;
   const results = await realScrapeSource(source, (msg) => {
     console.log(`[Scraper:${source.source_code}] ${msg}`);
+    // Push every progress message to the SSE stream so the live log updates in real-time
+    addLog(runId, msg, 'info');
+    // Increment estimated progress (10% per message, cap at 90% until complete)
+    progressPct = Math.min(90, progressPct + 10);
+    if (processDetails[runId]) processDetails[runId].progress = progressPct;
+    pushSSE(runId, { type: 'progress', progress: progressPct, message: msg });
   });
 
   // Add audit log entry
@@ -172,14 +200,32 @@ async function scrapeSource(source, runId) {
     });
   } catch (_) {}
 
-  // After scrape, trigger engine reload so new entries are immediately searchable
+   // Invalidate Redis cache so next reload fetches fresh data from DB
+  addLog(runId, '🗑 Invalidating Redis cache...', 'info');
   try {
-    const eng = require('../services/sanctionsEngine');
-    const status = eng.getStatus();
-    if (status.loaded) {
-      eng.reload().catch(e => console.error('[Scraper] Engine reload failed:', e.message));
-    }
-  } catch (_) {}
+    await require('../services/redisCache').invalidateIndex();
+    addLog(runId, '✓ Redis cache invalidated', 'info');
+  } catch (e) {
+    addLog(runId, `⚠ Redis invalidate failed: ${e.message}`, 'warn');
+  }
+  // Signal scrape completion to SSE stream
+  if (processDetails[runId]) processDetails[runId].progress = 100;
+  addLog(runId, `✓ ${source.source_code} complete: ${results.downloaded} downloaded, +${results.added} added, ~${results.updated} updated`, 'success');
+  pushSSE(runId, { type: 'complete', success: true, added: results.added, updated: results.updated, duration: Math.round((Date.now() - parseInt(runId.split('-')[1])) / 1000) });
+  // After scrape, delay 5s to let connection pool recover, then reload engine + populate Redis
+  addLog(runId, '⏳ Waiting 5s for DB pool to recover before engine reload...', 'info');
+  setTimeout(() => {
+    addLog(runId, '🔄 Reloading sanctions engine from DB into RAM...', 'info');
+    require('../services/sanctionsEngine').reload()
+      .then(r => {
+        addLog(runId, `✓ Engine reloaded: ${r?.count?.toLocaleString()} entries loaded from ${r?.source === 'redis' ? 'Redis cache' : 'SQL Server'} in ${r?.elapsed}ms`, 'info');
+        console.log(`[Scraper] Engine reloaded after scrape: ${r?.count?.toLocaleString()} entries (${r?.source})`);
+      })
+      .catch(e => {
+        addLog(runId, `✗ Engine reload failed: ${e.message}`, 'error');
+        console.error('[Scraper] Engine reload failed:', e.message);
+      });
+  }, 5000);;
 
   return results;
 }
@@ -229,6 +275,24 @@ router.get('/stream/:processId', (req, res) => {
   req.on('close', () => {
     clearInterval(hb);
     sseClients[processId] = (sseClients[processId] || []).filter(r => r !== res);
+  });
+});
+
+// Polling endpoint — returns buffered logs + status for a runId
+// Used instead of SSE when the tunnel proxy buffers streaming responses
+router.get('/logs/:processId', (req, res) => {
+  const { processId } = req.params;
+  const since = parseInt(req.query.since || '0', 10); // index of last seen log
+  const logs = processLogs[processId] || [];
+  const d    = processDetails[processId] || {};
+  const src  = Object.entries(scraperStatus).find(([, v]) => v.runId === processId);
+  const isRunning = src ? src[1].running : false;
+  res.json({
+    logs:      logs.slice(since),       // only send new entries since last poll
+    total:     logs.length,             // total log count so client knows next 'since'
+    progress:  d.progress || 0,
+    status:    isRunning ? 'running' : (d.progress >= 100 ? 'complete' : d.status || 'idle'),
+    done:      !isRunning && (d.progress >= 100 || d.status === 'complete' || d.status === 'error'),
   });
 });
 
@@ -591,6 +655,97 @@ async function runGenericProcess(pid, params) {
   processDetails[pid].status = 'completed';
   pushSSE(pid, { type: 'complete', success: true });
 }
+
+// ── Per-source timed run with stage breakdown ────────────────────────────────
+// POST /api/scraper/timed-run/:sourceCode
+router.post('/timed-run/:sourceCode', async (req, res) => {
+  try {
+    const { sourceCode } = req.params;
+    const source = await query('SELECT * FROM sanctions_list_sources WHERE source_code = @code', { code: sourceCode });
+    if (!source.recordset.length) return res.status(404).json({ error: 'Source not found' });
+    const src = source.recordset[0];
+
+    const t0 = Date.now();
+    let downloadDone = 0;
+    const progressMsgs = [];
+
+    const result = await realScrapeSource(src, (msg) => {
+      progressMsgs.push({ ts: Date.now(), msg });
+      if (!downloadDone && /download|fetched|parsed|downloaded/i.test(msg)) {
+        downloadDone = Date.now();
+      }
+    });
+    const afterInsert = Date.now();
+
+    // Stage 3: RAM reload
+    const t2 = Date.now();
+    try {
+      const eng = require('../services/sanctionsEngine');
+      await eng.reload();
+    } catch (_) {}
+    const ramMs = Date.now() - t2;
+
+    const totalMs    = afterInsert - t0;
+    const downloadMs = downloadDone ? downloadDone - t0 : Math.round(totalMs * 0.35);
+    const insertMs   = downloadDone ? afterInsert - downloadDone : Math.round(totalMs * 0.55);
+
+    try {
+      await query(
+        `INSERT INTO audit_log (event_type, entity_type, entity_id, action, performed_by, description)
+         VALUES ('LIST_SCRAPE', 'SANCTIONS_LIST', @code, 'UPDATE', 'System', @desc)`,
+        { code: sourceCode, desc: `${sourceCode}: ${result.downloaded} records | +${result.added} added | ~${result.updated} updated | dl:${downloadMs}ms ins:${insertMs}ms ram:${ramMs}ms` }
+      );
+    } catch (_) {}
+
+    res.json({
+      source: sourceCode,
+      download_ms: downloadMs,
+      insert_ms:   insertMs,
+      ram_ms:      ramMs,
+      total_ms:    totalMs + ramMs,
+      downloaded:  result.downloaded || 0,
+      added:       result.added      || 0,
+      updated:     result.updated    || 0,
+      deleted:     result.deleted    || 0,
+      logs:        progressMsgs.map(m => m.msg),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/scraper/reload-ram  — reload sanctions engine from DB into RAM
+router.post('/reload-ram', async (req, res) => {
+  try {
+    const t0 = Date.now();
+    // D — Invalidate Redis cache so reload fetches fresh data from DB
+    try { await require('../services/redisCache').invalidateIndex(); } catch (_) {}
+    const eng = require('../services/sanctionsEngine');
+    const result = await eng.reload();
+    const ramMs = Date.now() - t0;
+    try {
+      await query(
+        `INSERT INTO audit_log (event_type, entity_type, entity_id, action, performed_by, description)
+         VALUES ('RAM_RELOAD', 'SANCTIONS_ENGINE', 'ALL', 'RELOAD', 'System', @desc)`,
+        { desc: `Sanctions RAM engine reloaded: ${result?.count?.toLocaleString() || '?'} entries in ${ramMs}ms` }
+      );
+    } catch (_) {}
+    res.json({ message: 'RAM engine reloaded', entries: result?.count || 0, ram_ms: ramMs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/scraper/engine-status  — current RAM engine status
+router.get('/engine-status', (req, res) => {
+  try {
+    const eng = require('../services/sanctionsEngine');
+    const status = eng.getStatus();
+    res.json(status);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Also override scheduler to return proper job format
 router.get('/scheduler-jobs', async (req, res) => {

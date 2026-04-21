@@ -41,7 +41,13 @@ export default function ScreeningAll() {
           source_system: 'ALL_LISTS_SCREEN', requested_by: 'Compliance Officer',
           lists_to_check: [list.code], threshold: form.threshold
         })
-        res[list.code] = r.data
+        const d = r.data
+        const subj0 = d.results?.[0] || {}
+        res[list.code] = {
+          overallResult: subj0.result || d.overallResult || 'CLEAR',
+          matches: subj0.matchList || subj0.matches || [],
+          topScore: subj0.score || 0,
+        }
       } catch { res[list.code] = { overallResult: 'ERROR', matches: [] } }
       setResults({ ...res })
     }))
@@ -103,13 +109,28 @@ export default function ScreeningAll() {
                     </div>
                     {r?.matches?.length > 0 && (
                       <div className="space-y-2">
-                        {r.matches.slice(0, 2).map((m: any, i: number) => (
-                          <div key={i} className="bg-slate-800/60 rounded-lg p-2">
-                            <div className="text-xs font-medium text-white truncate">{m.primary_name}</div>
-                            <ScoreBar score={m.match_score} />
-                          </div>
-                        ))}
-                        {r.matches.length > 2 && <div className="text-xs text-slate-500 text-center">+{r.matches.length - 2} more</div>}
+                        {r.matches.slice(0, 3).map((m: any, i: number) => {
+                          const score = m.score ?? m.match_score
+                          const scoreColor = score >= 90 ? 'text-red-400' : score >= 70 ? 'text-amber-400' : 'text-yellow-400'
+                          return (
+                            <div key={i} className="bg-slate-800/60 rounded-lg p-2">
+                              <div className="flex items-center justify-between gap-1 mb-1">
+                                <div className="text-xs font-semibold text-white truncate flex-1">{m.primary_name || m.name}</div>
+                                <div className={`text-xs font-bold shrink-0 ${scoreColor}`}>{score}%</div>
+                              </div>
+                              {(m.list_source || m.source_code) && (
+                                <span className="text-xs font-mono text-blue-300 bg-blue-900/20 px-1.5 py-0.5 rounded inline-block mb-1">
+                                  {m.list_source || m.source_code}
+                                </span>
+                              )}
+                              {m.list_name && (
+                                <div className="text-xs text-slate-500 truncate">{m.list_name}</div>
+                              )}
+                              <ScoreBar score={score} />
+                            </div>
+                          )
+                        })}
+                        {r.matches.length > 3 && <div className="text-xs text-slate-500 text-center">+{r.matches.length - 3} more</div>}
                       </div>
                     )}
                     {r?.overallResult === 'CLEAR' && <div className="text-xs text-green-400 text-center py-2">No matches found</div>}

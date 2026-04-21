@@ -1,0 +1,410 @@
+/**
+ * In-Memory PEP (Politically Exposed Persons) Screening Engine
+ * =============================================================
+ * Mirrors the SanctionsEngine architecture:
+ *   DB (pep_entries_mem) → RAM Map → Token Index → Candidate lookup → Fuzzy score
+ *
+ * NOTE: Reads from pep_entries_mem (SQL Server In-Memory OLTP table) for fast
+ * bulk loads. pep_entries_mem is populated from pep_entries (disk) on startup
+ * by pepMemLoader.js.
+ *
+ * Sources loaded:
+ *   1. OpenSanctions PEP dataset  (~700K records)
+ *   2. Wikidata political figures (supplementary enrichment)
+ *   3. ICIJ Offshore Leaks        (adverse links in remarks)
+ *
+ * Performance target: <20ms per screening request
+ */
+'use strict';
+
+const { query } = require('../db/connection');
+const { doubleMetaphone } = require('double-metaphone');
+
+// ── Engine state ──────────────────────────────────────────────────────────────
+let _pepEntries    = new Map();   // pep_id → pep object
+let _tokenIndex    = new Map();   // token → Set of pep_ids
+let _phoneticIndex = new Map();   // metaphone_code → Set of pep_ids (B: phonetic index)
+let _loadedAt      = null;
+let _entryCount    = 0;
+let _isLoading     = false;
+let _loadPromise   = null;
+
+// ── Tokenizer ─────────────────────────────────────────────────────────────────
+function tokenize(name) {
+  if (!name) return [];
+  return name
+    .toUpperCase()
+    .replace(/[^A-Z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(t => t.length >= 2);
+}
+
+// ── Phonetic codes (Double Metaphone) ───────────────────────────────────────
+function phoneticCodes(name) {
+  if (!name) return [];
+  const codes = new Set();
+  for (const tok of tokenize(name)) {
+    if (tok.length < 3) continue;
+    try {
+      const [primary, secondary] = doubleMetaphone(tok);
+      if (primary)   codes.add(primary);
+      if (secondary) codes.add(secondary);
+    } catch (_) {}
+  }
+  return [...codes];
+}
+
+// ── Levenshtein similarity (0-100) ────────────────────────────────────────────
+function similarity(a, b) {
+  if (a === b) return 100;
+  if (!a || !b) return 0;
+  const la = a.length, lb = b.length;
+  if (Math.abs(la - lb) > Math.max(la, lb) * 0.6) return 0;
+  if (a.includes(b) || b.includes(a)) {
+    return Math.round((Math.min(la, lb) / Math.max(la, lb)) * 100);
+  }
+  const dp = Array.from({ length: la + 1 }, (_, i) =>
+    Array.from({ length: lb + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0))
+  );
+  for (let i = 1; i <= la; i++) {
+    for (let j = 1; j <= lb; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j - 1], dp[i - 1][j], dp[i][j - 1]);
+    }
+  }
+  return Math.round((1 - dp[la][lb] / Math.max(la, lb)) * 100);
+}
+
+function scoreName(searchName, entryName) {
+  const s = searchName.toUpperCase().trim();
+  const e = entryName.toUpperCase().trim();
+  if (s === e) return 100;
+  const fullScore = similarity(s, e);
+  const sToks = tokenize(s);
+  const eToks = tokenize(e);
+  if (sToks.length === 0 || eToks.length === 0) return fullScore;
+  let tokenScore = 0;
+  for (const st of sToks) {
+    let best = 0;
+    for (const et of eToks) {
+      const sc = similarity(st, et);
+      if (sc > best) best = sc;
+    }
+    tokenScore += best;
+  }
+  tokenScore = Math.round(tokenScore / sToks.length);
+  return Math.max(fullScore, tokenScore);
+}
+
+// ── Load all PEP entries into RAM ─────────────────────────────────────────────
+async function loadPEPs() {
+  if (_isLoading) return _loadPromise;
+  _isLoading   = true;
+  _loadPromise = _doLoad();
+  return _loadPromise;
+}
+
+async function _doLoad() {
+  console.log('[PEPEngine] Loading PEP entries into RAM...');
+  const t0 = Date.now();
+  try {
+    // Paginated load (10K rows/page) with pool reconnect between pages
+    // to avoid Azure SQL 5-minute connection timeout
+    const { getPool, sql: sqlLib } = require('../db/connection');
+    const PAGE = 10000;
+    let offset = 0;
+    const rows = [];
+    while (true) {
+      // Get a fresh pool connection for each page to avoid timeout
+      let page = [];
+      try {
+        const pool = await getPool();
+        const result = await pool.request().query(`
+          SELECT
+            id, external_id, source, schema_type,
+            primary_name, aliases, birth_date,
+            countries, nationality, position,
+            political_party, gender, dataset,
+            remarks, adverse_links, wikidata_id,
+            icij_node_id, first_seen, last_seen, status
+          FROM pep_entries_mem
+          WHERE status = 'ACTIVE'
+          ORDER BY id
+          OFFSET ${offset} ROWS FETCH NEXT ${PAGE} ROWS ONLY
+        `);
+        page = result.recordset || [];
+      } catch (pageErr) {
+        // On socket error, wait 3s and retry once with fresh pool
+        console.log(`[PEPEngine] Page ${offset}-${offset+PAGE} error: ${pageErr.message}, retrying...`);
+        await new Promise(r => setTimeout(r, 3000));
+        const pool = await getPool();
+        const result = await pool.request().query(`
+          SELECT
+            id, external_id, source, schema_type,
+            primary_name, aliases, birth_date,
+            countries, nationality, position,
+            political_party, gender, dataset,
+            remarks, adverse_links, wikidata_id,
+            icij_node_id, first_seen, last_seen, status
+          FROM pep_entries_mem
+          WHERE status = 'ACTIVE'
+          ORDER BY id
+          OFFSET ${offset} ROWS FETCH NEXT ${PAGE} ROWS ONLY
+        `);
+        page = result.recordset || [];
+      }
+      if (page.length === 0) break;
+      rows.push(...page);
+      offset += PAGE;
+      if (page.length < PAGE) break;
+      console.log(`[PEPEngine] Loaded ${rows.length.toLocaleString()} rows so far...`);
+    }
+    const newEntries     = new Map();
+    const newTokenIdx    = new Map();
+    const newPhoneticIdx = new Map();
+
+    for (const row of rows) {
+      // Parse aliases (stored as pipe-separated string)
+      const aliasList = row.aliases
+        ? row.aliases.split('|').map(a => a.trim()).filter(Boolean)
+        : [];
+
+      const entry = {
+        id:           row.id,
+        externalId:   row.external_id,
+        source:       row.source,
+        schemaType:   row.schema_type,
+        name:         row.primary_name,
+        aliases:      aliasList,
+        birthDate:    row.birth_date,
+        countries:    row.countries,
+        nationality:  row.nationality,
+        position:     row.position,
+        party:        row.political_party,
+        gender:       row.gender,
+        dataset:      row.dataset,
+        remarks:      row.remarks,
+        adverseLinks: row.adverse_links,
+        wikidataId:   row.wikidata_id,
+        icijNodeId:   row.icij_node_id,
+        firstSeen:    row.first_seen,
+        lastSeen:     row.last_seen,
+      };
+
+      newEntries.set(row.id, entry);
+
+      // Index primary name tokens
+      for (const token of tokenize(row.primary_name)) {
+        if (!newTokenIdx.has(token)) newTokenIdx.set(token, new Set());
+        newTokenIdx.get(token).add(row.id);
+      }
+      // Index alias tokens
+      for (const alias of aliasList) {
+        for (const token of tokenize(alias)) {
+          if (!newTokenIdx.has(token)) newTokenIdx.set(token, new Set());
+          newTokenIdx.get(token).add(row.id);
+        }
+      }
+      // B: Phonetic index for primary name and aliases
+      for (const code of phoneticCodes(row.primary_name)) {
+        if (!newPhoneticIdx.has(code)) newPhoneticIdx.set(code, new Set());
+        newPhoneticIdx.get(code).add(row.id);
+      }
+      for (const alias of aliasList) {
+        for (const code of phoneticCodes(alias)) {
+          if (!newPhoneticIdx.has(code)) newPhoneticIdx.set(code, new Set());
+          newPhoneticIdx.get(code).add(row.id);
+        }
+      }
+    }
+
+    _pepEntries    = newEntries;
+    _tokenIndex    = newTokenIdx;
+    _phoneticIndex = newPhoneticIdx;
+    _entryCount    = newEntries.size;
+    _loadedAt   = new Date();
+    _isLoading  = false;
+
+    const elapsed = Date.now() - t0;
+    const memMB   = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+    console.log(`[PEPEngine] Loaded ${_entryCount.toLocaleString()} PEP entries in ${elapsed}ms | heap: ${memMB}MB`);
+    return { count: _entryCount, loadedAt: _loadedAt, elapsed };
+  } catch (err) {
+    _isLoading = false;
+    console.error('[PEPEngine] Load failed:', err.message);
+    throw err;
+  }
+}
+
+// ── PEP screening function ────────────────────────────────────────────────────
+/**
+ * Screen a name against the in-memory PEP index.
+ * @param {string} name
+ * @param {object} opts - { threshold=60, maxResults=10, sources=[] }
+ * @returns {{ matches, topScore, result, screenedAt, durationMs }}
+ */
+function screenPEP(name, opts = {}) {
+  if (!name || typeof name !== 'string') {
+    return { matches: [], topScore: 0, result: 'CLEAR', error: 'No name provided' };
+  }
+  const threshold   = opts.threshold  ?? 60;
+  const maxResults  = opts.maxResults ?? 10;
+  const t0          = Date.now();
+  const searchUpper = name.toUpperCase().trim();
+  const searchToks  = tokenize(searchUpper);
+
+  // Step 1: Candidate retrieval via token index + phonetic index
+  const candidateIds = new Set();
+  for (const token of searchToks) {
+    const ids = _tokenIndex.get(token);
+    if (ids) ids.forEach(id => candidateIds.add(id));
+  }
+  // B: Add phonetic candidates (catches Gaddafi/Qaddafi, Mohammed/Muhammad)
+  for (const code of phoneticCodes(searchUpper)) {
+    const ids = _phoneticIndex.get(code);
+    if (ids) ids.forEach(id => candidateIds.add(id));
+  }
+
+  // Broaden if too few candidates
+  if (candidateIds.size < 20 && searchToks.length > 0) {
+    const firstTok = searchToks[0];
+    for (const [tok, ids] of _tokenIndex) {
+      if (tok.startsWith(firstTok.substring(0, Math.max(3, firstTok.length - 1)))) {
+        ids.forEach(id => candidateIds.add(id));
+      }
+    }
+  }
+
+  // Step 2: Score candidates
+  const scored = [];
+  for (const id of candidateIds) {
+    const entry = _pepEntries.get(id);
+    if (!entry) continue;
+
+    let bestScore = scoreName(searchUpper, entry.name);
+    let matchedOn = entry.name;
+
+    for (const alias of entry.aliases) {
+      const s = scoreName(searchUpper, alias);
+      if (s > bestScore) { bestScore = s; matchedOn = alias; }
+    }
+
+    if (bestScore >= threshold) {
+      scored.push({ entry, score: bestScore, matchedOn });
+    }
+  }
+
+  // Step 3: Sort and limit
+  scored.sort((a, b) => b.score - a.score || a.entry.name.localeCompare(b.entry.name));
+  const topMatches = scored.slice(0, maxResults);
+
+  const matches = topMatches.map(({ entry, score, matchedOn }) => ({
+    id:           entry.id,
+    externalId:   entry.externalId,
+    source:       entry.source,
+    name:         entry.name,
+    matchedOn,
+    score,
+    schemaType:   entry.schemaType,
+    birthDate:    entry.birthDate,
+    countries:    entry.countries,
+    nationality:  entry.nationality,
+    position:     entry.position,
+    party:        entry.party,
+    gender:       entry.gender,
+    dataset:      entry.dataset,
+    remarks:      entry.remarks,
+    adverseLinks: entry.adverseLinks,
+    wikidataId:   entry.wikidataId,
+    icijNodeId:   entry.icijNodeId,
+    firstSeen:    entry.firstSeen,
+    lastSeen:     entry.lastSeen,
+    aliases:      entry.aliases,
+  }));
+
+  const topScore = matches.length > 0 ? matches[0].score : 0;
+  const result   = topScore >= 85 ? 'HIT' : topScore >= threshold ? 'POSSIBLE_MATCH' : 'CLEAR';
+
+  return {
+    matches,
+    topScore,
+    result,
+    screenedAt:  new Date().toISOString(),
+    durationMs:  Date.now() - t0,
+    totalPEPs:   _entryCount,
+  };
+}
+
+// ── Status / reload ───────────────────────────────────────────────────────────
+function getPEPStatus() {
+  return {
+    loaded:     _entryCount > 0,
+    entryCount: _entryCount,
+    loadedAt:   _loadedAt,
+    memoryMB:   Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+  };
+}
+
+async function reloadPEPs() {
+  _isLoading   = false;
+  _loadPromise = null;
+  _pepEntries    = new Map();
+  _tokenIndex    = new Map();
+  _phoneticIndex = new Map();
+  _entryCount    = 0;
+  return loadPEPs();
+}
+
+// ── Upsert a single PEP entry into RAM (used after delta updates) ─────────────
+function upsertPEPInRAM(pepRow) {
+  const aliasList = pepRow.aliases
+    ? pepRow.aliases.split('|').map(a => a.trim()).filter(Boolean)
+    : [];
+  const entry = {
+    id:           pepRow.id,
+    externalId:   pepRow.external_id,
+    source:       pepRow.source,
+    schemaType:   pepRow.schema_type,
+    name:         pepRow.primary_name,
+    aliases:      aliasList,
+    birthDate:    pepRow.birth_date,
+    countries:    pepRow.countries,
+    nationality:  pepRow.nationality,
+    position:     pepRow.position,
+    party:        pepRow.political_party,
+    gender:       pepRow.gender,
+    dataset:      pepRow.dataset,
+    remarks:      pepRow.remarks,
+    adverseLinks: pepRow.adverse_links,
+    wikidataId:   pepRow.wikidata_id,
+    icijNodeId:   pepRow.icij_node_id,
+    firstSeen:    pepRow.first_seen,
+    lastSeen:     pepRow.last_seen,
+  };
+  _pepEntries.set(pepRow.id, entry);
+  for (const token of tokenize(pepRow.primary_name)) {
+    if (!_tokenIndex.has(token)) _tokenIndex.set(token, new Set());
+    _tokenIndex.get(token).add(pepRow.id);
+  }
+  for (const alias of aliasList) {
+    for (const token of tokenize(alias)) {
+      if (!_tokenIndex.has(token)) _tokenIndex.set(token, new Set());
+      _tokenIndex.get(token).add(pepRow.id);
+    }
+  }
+  // Phonetic index update
+  for (const code of phoneticCodes(pepRow.primary_name)) {
+    if (!_phoneticIndex.has(code)) _phoneticIndex.set(code, new Set());
+    _phoneticIndex.get(code).add(pepRow.id);
+  }
+  for (const alias of aliasList) {
+    for (const code of phoneticCodes(alias)) {
+      if (!_phoneticIndex.has(code)) _phoneticIndex.set(code, new Set());
+      _phoneticIndex.get(code).add(pepRow.id);
+    }
+  }
+  _entryCount = _pepEntries.size;
+}
+
+module.exports = { loadPEPs, screenPEP, getPEPStatus, reloadPEPs, upsertPEPInRAM };

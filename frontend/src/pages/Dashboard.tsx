@@ -89,7 +89,7 @@ export default function Dashboard() {
             {loading ? 'Refreshing...' : 'Refresh'}
           </button>
           <button onClick={() => navigate('/screening/quick')} className="btn-primary flex items-center gap-2 text-sm">
-            <Zap size={14} /> Quick Screen
+            <Zap size={14} /> Master Screener
           </button>
         </div>
       </div>
@@ -132,17 +132,7 @@ export default function Dashboard() {
               subtitle="Active entries" onClick={() => navigate('/sanctions')} />
           </div>
 
-          {/* Banking KPIs */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <StatCard title="Active Customers" value={banking.total_customers || 0} icon={<Users size={18} />} color="blue"
-              subtitle="Core banking" onClick={() => navigate('/customers')} />
-            <StatCard title="Active Accounts" value={banking.total_accounts || 0} icon={<Activity size={18} />} color="green"
-              subtitle="All account types" onClick={() => navigate('/accounts')} />
-            <StatCard title="Today's Transactions" value={banking.today_transactions || 0} icon={<TrendingUp size={18} />} color="cyan"
-              subtitle="Processed today" onClick={() => navigate('/transactions')} />
-            <StatCard title="Blocked Transactions" value={banking.blocked_transactions || 0} icon={<XCircle size={18} />} color="red"
-              subtitle="Sanctions blocked" onClick={() => navigate('/transactions')} />
-          </div>
+
 
           {/* Charts Row */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -291,7 +281,7 @@ export default function Dashboard() {
             </div>
             <div className="p-4 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
               {[
-                { label: 'Quick Screen', icon: <Shield size={16} />, path: '/screening/quick', color: 'text-blue-400' },
+                { label: 'Master Screener', icon: <Shield size={16} />, path: '/screening/quick', color: 'text-blue-400' },
                 { label: 'Batch Screen', icon: <Activity size={16} />, path: '/screening/batch', color: 'text-cyan-400' },
                 { label: 'OFAC Screen', icon: <Globe size={16} />, path: '/screening/ofac', color: 'text-red-400' },
                 { label: 'New Case', icon: <FileText size={16} />, path: '/cases', color: 'text-purple-400' },

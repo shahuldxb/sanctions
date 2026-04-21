@@ -88,58 +88,26 @@ router.post('/engine-reload', async (req, res) => {
 
 // ── POST new screening request (uses in-memory engine) ───────────────────────
 router.post('/screen', async (req, res) => {
+  const t0 = Date.now();
   try {
-    const { subjects, source_system = 'MANUAL', requested_by = 'API', priority = 'NORMAL' } = req.body;
+    const { subjects, source_system = 'MANUAL', requested_by = 'API', priority = 'NORMAL', threshold = 60 } = req.body;
     if (!subjects || !subjects.length) return res.status(400).json({ error: 'subjects required' });
 
     const requestId = `SCR-${Date.now()}`;
     const eng = getEngine();
 
-    // Create screening request record
-    const reqResult = await query(`
-      INSERT INTO screening_requests (request_id, request_type, source_system, requested_by, priority, status, total_subjects)
-      OUTPUT INSERTED.*
-      VALUES (@request_id, @request_type, @source_system, @requested_by, @priority, 'SCREENING', @total_subjects)
-    `, {
-      request_id: requestId,
-      request_type: subjects.length > 1 ? 'BATCH' : subjects[0]?.subject_type || 'INDIVIDUAL',
-      source_system, requested_by, priority,
-      total_subjects: subjects.length
-    });
-
-    const screeningRequest = reqResult.recordset[0];
-    const results = [];
-
-    // Screen each subject
+    // ── FAST PATH: run in-memory engine first, respond immediately ────────────
+    const screenedSubjects = [];
     for (const subject of subjects) {
-      // Insert subject record
-      const subjectResult = await query(`
-        INSERT INTO screening_subjects (request_id, subject_type, subject_name, subject_role, dob, nationality, country, identifier_type, identifier_value)
-        OUTPUT INSERTED.*
-        VALUES (@request_id, @subject_type, @subject_name, @subject_role, @dob, @nationality, @country, @identifier_type, @identifier_value)
-      `, {
-        request_id: screeningRequest.id,
-        subject_type: subject.subject_type || 'INDIVIDUAL',
-        subject_name: subject.subject_name,
-        subject_role: subject.subject_role || 'SUBJECT',
-        dob: subject.dob || null,
-        nationality: subject.nationality || null,
-        country: subject.country || null,
-        identifier_type: subject.identifier_type || null,
-        identifier_value: subject.identifier_value || null
-      });
-
-      const newSubject = subjectResult.recordset[0];
-
-      // ── Use in-memory engine if available, else fall back to DB ──────────
       let matches = [];
       let topScore = 0;
       let screeningResult = 'CLEAR';
       let engineUsed = 'DB_FALLBACK';
+      let engineDurationMs = 0;
 
       if (eng && eng.getStatus().loaded) {
-        // Fast in-memory screening
-        const engineResult = eng.screen(subject.subject_name, { threshold: 60, maxResults: 10 });
+        const engineResult = eng.screen(subject.subject_name, { threshold, maxResults: 20 });
+        engineDurationMs = engineResult.durationMs;
         matches = engineResult.matches.map(m => ({
           entry_id:      m.entryId,
           score:         m.score,
@@ -161,7 +129,6 @@ router.post('/screen', async (req, res) => {
         screeningResult = engineResult.result;
         engineUsed = `IN_MEMORY (${engineResult.durationMs}ms, ${engineResult.candidatesEvaluated}/${engineResult.totalEntries} candidates)`;
       } else {
-        // DB fallback
         matches = await performFuzzyMatchDB(subject.subject_name);
         for (const m of matches) { if (m.score > topScore) topScore = m.score; }
         if (topScore >= 90) screeningResult = 'BLOCKED';
@@ -169,65 +136,109 @@ router.post('/screen', async (req, res) => {
         else screeningResult = 'CLEAR';
       }
 
-      // Persist matches
-      for (const match of matches) {
-        await query(`
-          INSERT INTO screening_matches (subject_id, entry_id, match_score, match_type, matched_field, matched_value, list_source, programme, disposition)
-          VALUES (@subject_id, @entry_id, @match_score, @match_type, @matched_field, @matched_value, @list_source, @programme, 'PENDING')
+      screenedSubjects.push({ subject, matches, topScore, screeningResult, engineUsed, engineDurationMs });
+    }
+
+    const overallResult = screenedSubjects.some(s => s.screeningResult === 'BLOCKED') ? 'BLOCKED' :
+                          screenedSubjects.some(s => s.screeningResult === 'POTENTIAL_MATCH') ? 'POTENTIAL_MATCH' : 'CLEAR';
+    const totalElapsedMs = Date.now() - t0;
+
+    // ── RESPOND IMMEDIATELY — client gets results in <50ms ────────────────────
+    res.json({
+      requestId,
+      overallResult,
+      elapsed_ms: totalElapsedMs,
+      results: screenedSubjects.map(s => ({
+        subject:    s.subject.subject_name,
+        result:     s.screeningResult,
+        score:      s.topScore,
+        matches:    s.matches.length,
+        matchList:  s.matches,
+        engineUsed: s.engineUsed,
+      })),
+      screeningRequestId: null, // will be set asynchronously
+    });
+
+    // ── ASYNC PERSISTENCE — does not block the response ───────────────────────
+    setImmediate(async () => {
+      try {
+        const reqResult = await query(`
+          INSERT INTO screening_requests (request_id, request_type, source_system, requested_by, priority, status, total_subjects)
+          OUTPUT INSERTED.*
+          VALUES (@request_id, @request_type, @source_system, @requested_by, @priority, 'SCREENING', @total_subjects)
         `, {
-          subject_id:    newSubject.id,
-          entry_id:      match.entry_id,
-          match_score:   match.score,
-          match_type:    match.match_type,
-          matched_field: match.matched_field,
-          matched_value: match.matched_value,
-          list_source:   match.list_source,
-          programme:     match.programme
+          request_id: requestId,
+          request_type: subjects.length > 1 ? 'BATCH' : subjects[0]?.subject_type || 'INDIVIDUAL',
+          source_system, requested_by, priority,
+          total_subjects: subjects.length
         });
+        const screeningRequest = reqResult.recordset[0];
+
+        for (const { subject, matches, topScore, screeningResult } of screenedSubjects) {
+          const subjectResult = await query(`
+            INSERT INTO screening_subjects (request_id, subject_type, subject_name, subject_role, dob, nationality, country, identifier_type, identifier_value)
+            OUTPUT INSERTED.*
+            VALUES (@request_id, @subject_type, @subject_name, @subject_role, @dob, @nationality, @country, @identifier_type, @identifier_value)
+          `, {
+            request_id:       screeningRequest.id,
+            subject_type:     subject.subject_type || 'INDIVIDUAL',
+            subject_name:     subject.subject_name,
+            subject_role:     subject.subject_role || 'SUBJECT',
+            dob:              subject.dob || null,
+            nationality:      subject.nationality || null,
+            country:          subject.country || null,
+            identifier_type:  subject.identifier_type || null,
+            identifier_value: subject.identifier_value || null
+          });
+          const newSubject = subjectResult.recordset[0];
+
+          for (const match of matches) {
+            await query(`
+              INSERT INTO screening_matches (subject_id, entry_id, match_score, match_type, matched_field, matched_value, list_source, programme, disposition)
+              VALUES (@subject_id, @entry_id, @match_score, @match_type, @matched_field, @matched_value, @list_source, @programme, 'PENDING')
+            `, {
+              subject_id:    newSubject.id,
+              entry_id:      match.entry_id,
+              match_score:   match.score,
+              match_type:    match.match_type,
+              matched_field: match.matched_field,
+              matched_value: match.matched_value,
+              list_source:   match.list_source,
+              programme:     match.programme
+            });
+          }
+
+          await query(`
+            UPDATE screening_subjects SET screening_result = @result, match_score = @score, screened_at = GETDATE()
+            WHERE id = @id
+          `, { result: screeningResult, score: topScore, id: newSubject.id });
+        }
+
+        await query(`
+          UPDATE screening_requests SET status = 'COMPLETED', overall_result = @overall_result,
+          completed_subjects = @completed, completed_at = GETDATE()
+          WHERE id = @id
+        `, { overall_result: overallResult, completed: subjects.length, id: screeningRequest.id });
+
+        if (overallResult !== 'CLEAR') {
+          const alertId = `ALERT-${Date.now()}`;
+          await query(`
+            INSERT INTO screening_alerts (alert_id, request_id, alert_type, severity, title, description, status)
+            VALUES (@alert_id, @request_id, @alert_type, @severity, @title, @description, 'OPEN')
+          `, {
+            alert_id:    alertId,
+            request_id:  screeningRequest.id,
+            alert_type:  overallResult === 'BLOCKED' ? 'BLOCKED' : 'POTENTIAL_MATCH',
+            severity:    overallResult === 'BLOCKED' ? 'CRITICAL' : 'HIGH',
+            title:       `${overallResult}: ${subjects.map(s => s.subject_name).join(', ')}`,
+            description: `Screening request ${requestId} resulted in ${overallResult}. ${screenedSubjects.filter(s => s.screeningResult !== 'CLEAR').length} subject(s) flagged.`
+          });
+        }
+      } catch (persistErr) {
+        console.error('[screening] async persist error:', persistErr.message);
       }
+    });
 
-      // Update subject result
-      await query(`
-        UPDATE screening_subjects SET screening_result = @result, match_score = @score, screened_at = GETDATE()
-        WHERE id = @id
-      `, { result: screeningResult, score: topScore, id: newSubject.id });
-
-      results.push({
-        subject: subject.subject_name,
-        result: screeningResult,
-        score: topScore,
-        matches: matches.length,
-        engineUsed
-      });
-    }
-
-    // Overall result
-    const overallResult = results.some(r => r.result === 'BLOCKED') ? 'BLOCKED' :
-                          results.some(r => r.result === 'POTENTIAL_MATCH') ? 'POTENTIAL_MATCH' : 'CLEAR';
-
-    await query(`
-      UPDATE screening_requests SET status = 'COMPLETED', overall_result = @overall_result,
-      completed_subjects = @completed, completed_at = GETDATE()
-      WHERE id = @id
-    `, { overall_result: overallResult, completed: subjects.length, id: screeningRequest.id });
-
-    // Create alert if needed
-    if (overallResult !== 'CLEAR') {
-      const alertId = `ALERT-${Date.now()}`;
-      await query(`
-        INSERT INTO screening_alerts (alert_id, request_id, alert_type, severity, title, description, status)
-        VALUES (@alert_id, @request_id, @alert_type, @severity, @title, @description, 'OPEN')
-      `, {
-        alert_id:    alertId,
-        request_id:  screeningRequest.id,
-        alert_type:  overallResult === 'BLOCKED' ? 'BLOCKED' : 'POTENTIAL_MATCH',
-        severity:    overallResult === 'BLOCKED' ? 'CRITICAL' : 'HIGH',
-        title:       `${overallResult}: ${subjects.map(s => s.subject_name).join(', ')}`,
-        description: `Screening request ${requestId} resulted in ${overallResult}. ${results.filter(r => r.result !== 'CLEAR').length} subject(s) flagged.`
-      });
-    }
-
-    res.json({ requestId, overallResult, results, screeningRequestId: screeningRequest.id });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -370,15 +381,60 @@ router.post('/fuzzy-test', async (req, res) => {
 // ── GET screening history ─────────────────────────────────────────────────────
 router.get('/history', async (req, res) => {
   try {
-    const { page = 1, limit = 50, source_code = '', result = '' } = req.query;
+    const { page = 1, limit = 50, source_code = '', result = '', search = '' } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
     let where = 'WHERE 1=1';
     const params = {};
-    if (source_code) { where += ' AND source_system = @source'; params.source = source_code; }
-    if (result) { where += ' AND overall_result = @result'; params.result = result; }
-    const count = await query(`SELECT COUNT(*) as total FROM screening_requests ${where}`, params);
-    const result2 = await query(`SELECT * FROM screening_requests ${where} ORDER BY started_at DESC OFFSET ${offset} ROWS FETCH NEXT ${parseInt(limit)} ROWS ONLY`, params);
+    if (source_code) { where += ' AND r.source_system = @source'; params.source = source_code; }
+    if (result) { where += ' AND r.overall_result = @result'; params.result = result; }
+    if (search) {
+      where += ` AND EXISTS (SELECT 1 FROM screening_subjects ss WHERE ss.request_id = r.id AND ss.subject_name LIKE @search)`;
+      params.search = `%${search}%`;
+    }
+    const count = await query(`SELECT COUNT(*) as total FROM screening_requests r ${where}`, params);
+    const result2 = await query(`
+      SELECT r.*,
+        STUFF((
+          SELECT ', ' + s.subject_name
+          FROM screening_subjects s
+          WHERE s.request_id = r.id
+          FOR XML PATH(''), TYPE
+        ).value('.','NVARCHAR(MAX)'), 1, 2, '') AS subject_names,
+        (
+          SELECT MAX(s2.match_score)
+          FROM screening_subjects s2
+          WHERE s2.request_id = r.id
+        ) AS top_score,
+        (
+          SELECT COUNT(*)
+          FROM screening_matches sm
+          INNER JOIN screening_subjects ss ON sm.subject_id = ss.id
+          WHERE ss.request_id = r.id
+        ) AS match_count
+      FROM screening_requests r
+      ${where}
+      ORDER BY r.started_at DESC
+      OFFSET ${offset} ROWS FETCH NEXT ${parseInt(limit)} ROWS ONLY
+    `, params);
     res.json({ data: result2.recordset, total: count.recordset[0].total });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── GET all matches for a screening request ────────────────────────────────────
+router.get('/:id/matches', async (req, res) => {
+  try {
+    const result = await query(`
+      SELECT m.*, e.primary_name as entry_name, e.entry_type, e.dob as entry_dob,
+             e.nationality as entry_nationality, e.programme, e.remarks,
+             s.source_code, s.source_name, ss.subject_name
+      FROM screening_matches m
+      INNER JOIN screening_subjects ss ON m.subject_id = ss.id
+      LEFT JOIN sanctions_entries e ON m.entry_id = e.id
+      LEFT JOIN sanctions_list_sources s ON e.source_id = s.id
+      WHERE ss.request_id = @id
+      ORDER BY m.match_score DESC
+    `, { id: parseInt(req.params.id) });
+    res.json(result.recordset);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

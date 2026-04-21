@@ -66,10 +66,17 @@ export default function ScreeningByList({ source }: Props) {
         lists_to_check: [source],
         threshold: form.threshold
       })
-      setResult(r.data)
-      setHistory(prev => [{ name: form.name, result: r.data, ts: new Date().toISOString() }, ...prev.slice(0, 9)])
-      if (r.data.overallResult === 'BLOCKED') toast.error('⛔ BLOCKED — High confidence match found!')
-      else if (r.data.overallResult === 'POTENTIAL_MATCH') toast('⚠️ Potential match — Review required', { icon: '⚠️' })
+      const d = r.data
+      const subj0 = d.results?.[0] || {}
+      const normalized = {
+        overallResult: subj0.result || d.overallResult || 'CLEAR',
+        matches: subj0.matchList || subj0.matches || [],
+        topScore: subj0.score || 0,
+      }
+      setResult(normalized)
+      setHistory(prev => [{ name: form.name, result: normalized, ts: new Date().toISOString() }, ...prev.slice(0, 9)])
+      if (normalized.overallResult === 'BLOCKED') toast.error('⛔ BLOCKED — High confidence match found!')
+      else if (normalized.overallResult === 'POTENTIAL_MATCH') toast('⚠️ Potential match — Review required', { icon: '⚠️' })
       else toast.success('✓ Clear — No matches found')
     } catch (e: any) { toast.error(e.message) }
     finally { setLoading(false) }
@@ -193,18 +200,19 @@ export default function ScreeningByList({ source }: Props) {
                         <div className="flex items-start justify-between gap-4 mb-3">
                           <div>
                             <div className="font-semibold text-white">{m.primary_name || m.entry_name}</div>
-                            <div className="text-xs text-slate-500 mt-0.5">
-                              <span className="font-mono text-blue-300">{m.source_code || m.list_source}</span>
-                              {m.programme && <> · {m.programme}</>}
-                              {m.entry_type && <> · <Badge value={m.entry_type} /></>}
+                            <div className="text-xs text-slate-500 mt-0.5 flex flex-wrap items-center gap-1.5">
+                              <span className="font-mono text-blue-300 bg-blue-900/20 px-1.5 py-0.5 rounded">{m.list_source || m.source_code}</span>
+                              {m.list_name && <span className="text-slate-400">{m.list_name}</span>}
+                              {m.programme && <span className="text-slate-500">{m.programme}</span>}
+                              {m.entry_type && <Badge value={m.entry_type} />}
                             </div>
                           </div>
                           <div className="text-right shrink-0">
-                            <div className={`text-2xl font-bold ${m.match_score >= 90 ? 'text-red-400' : m.match_score >= 70 ? 'text-amber-400' : 'text-yellow-400'}`}>{m.match_score}%</div>
+                            <div className={`text-2xl font-bold ${(m.score ?? m.match_score) >= 90 ? 'text-red-400' : (m.score ?? m.match_score) >= 70 ? 'text-amber-400' : 'text-yellow-400'}`}>{m.score ?? m.match_score}%</div>
                             <Badge value={m.match_type || 'FUZZY'} />
                           </div>
                         </div>
-                        <ScoreBar score={m.match_score} />
+                        <ScoreBar score={m.score ?? m.match_score} />
                         <div className="grid grid-cols-3 gap-2 mt-3 text-xs">
                           <div><span className="text-slate-500">Matched on: </span><span className="text-slate-300">{m.matched_field || 'PRIMARY_NAME'}</span></div>
                           <div><span className="text-slate-500">Matched value: </span><span className="text-slate-300">{m.matched_value || m.primary_name}</span></div>
