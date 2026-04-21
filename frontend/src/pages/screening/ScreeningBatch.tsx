@@ -3,8 +3,9 @@ import { Badge, ScoreBar, Spinner, PageHeader, ProgressBar } from '../../compone
 import { SetPageHelp } from '../../components/HelpOverlay'
 import {
   Layers, Play, Download, CheckCircle, XCircle, AlertTriangle,
-  ChevronRight, Shield, User, Upload, Activity, Info
+  ChevronRight, Shield, User, Upload, Activity, Info, Bot
 } from 'lucide-react'
+import { aiAnalyze } from '../../api'
 import toast from 'react-hot-toast'
 import axios from 'axios'
 
@@ -64,22 +65,38 @@ function CategoryPill({ category }: { category: string }) {
   )
 }
 
-// ── Expandable row detail ─────────────────────────────────────────────────────
-function MatchDetail({ matches }: { matches: any[] }) {
-  const [open, setOpen] = useState(false)
-  if (!matches.length) return <span className="text-slate-600 text-xs">—</span>
-  return (
-    <div>
-      <button
-        onClick={() => setOpen(v => !v)}
-        className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors"
-      >
-        {matches.length} match{matches.length !== 1 ? 'es' : ''}
-        <ChevronRight size={10} className={`transition-transform ${open ? 'rotate-90' : ''}`} />
-      </button>
-      {open && (
-        <div className="mt-2 space-y-1.5 max-h-48 overflow-y-auto">
-          {matches.slice(0, 10).map((m: any, i: number) => (
+// ── Match list for a single subject with Sanctions/PEP/AI tabs ───────────────
+function SubjectMatchTabs({ subjectName, matches }: { subjectName: string; matches: any[] }) {
+  const [activeTab, setActiveTab] = useState<'sanctions' | 'pep' | 'ai'>('sanctions')
+  const [aiLoading, setAiLoading] = useState(false)
+  const [aiResult, setAiResult]   = useState<any>(null)
+
+  const sanctionsHits = matches.filter((m: any) => m.list_category === 'SANCTIONS')
+  const pepHits       = matches.filter((m: any) => m.list_category === 'PEP')
+
+  const runAI = async () => {
+    setAiLoading(true)
+    try {
+      const r = await aiAnalyze({
+        subject_name: subjectName,
+        subject_type: 'INDIVIDUAL',
+        context: 'Batch Screener (Unified — Sanctions + PEP)',
+        matches: matches.map((m: any) => ({
+          primary_name: m.primary_name, match_score: m.score,
+          source_code: m.source_code, list_category: m.list_category, position: m.position,
+        }))
+      })
+      setAiResult(r.data.analysis)
+      setActiveTab('ai')
+    } catch (e: any) { toast.error(e.message) }
+    finally { setAiLoading(false) }
+  }
+
+  const renderMatchList = (list: any[]) => (
+    list.length === 0
+      ? <div className="py-8 text-center"><CheckCircle size={22} className="text-emerald-500 mx-auto mb-2" /><p className="text-slate-400 text-sm">No matches in this category</p></div>
+      : <div className="space-y-1.5 p-3 max-h-64 overflow-y-auto">
+          {list.map((m: any, i: number) => (
             <div key={i} className="flex items-start gap-2 text-xs bg-slate-900/60 rounded px-2 py-1.5">
               <div className="flex-1 min-w-0">
                 <div className="text-white font-medium truncate">{m.primary_name}</div>
@@ -97,8 +114,71 @@ function MatchDetail({ matches }: { matches: any[] }) {
               </span>
             </div>
           ))}
-          {matches.length > 10 && (
-            <div className="text-xs text-slate-500 text-center py-1">+{matches.length - 10} more</div>
+        </div>
+  )
+
+  return (
+    <div className="rounded-lg border border-slate-700/40 overflow-hidden">
+      {/* Tab bar */}
+      <div className="flex border-b border-slate-700/40 bg-slate-900/40">
+        {[
+          { id: 'sanctions', label: 'Sanctions', count: sanctionsHits.length, icon: Shield, activeColor: 'border-blue-500 text-blue-400' },
+          { id: 'pep',       label: 'PEP',       count: pepHits.length,       icon: User,   activeColor: 'border-purple-500 text-purple-400' },
+          { id: 'ai',        label: 'AI Analysis', count: 0,                  icon: Bot,    activeColor: 'border-emerald-500 text-emerald-400' },
+        ].map(tab => (
+          <button
+            key={tab.id}
+            onClick={() => tab.id === 'ai' && !aiResult ? runAI() : setActiveTab(tab.id as any)}
+            className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium border-b-2 transition-colors ${
+              activeTab === tab.id ? `${tab.activeColor} bg-slate-800/40` : 'border-transparent text-slate-500 hover:text-slate-300'
+            }`}
+          >
+            <tab.icon size={11} />
+            {tab.label}
+            {tab.id !== 'ai' && (
+              <span className={`text-xs px-1 py-0.5 rounded font-mono ${
+                tab.count > 0
+                  ? tab.id === 'sanctions' ? 'bg-blue-500/20 text-blue-300' : 'bg-purple-500/20 text-purple-300'
+                  : 'bg-slate-700/60 text-slate-500'
+              }`}>{tab.count}</span>
+            )}
+          </button>
+        ))}
+      </div>
+      {/* Tab content */}
+      {activeTab === 'sanctions' && renderMatchList(sanctionsHits)}
+      {activeTab === 'pep' && renderMatchList(pepHits)}
+      {activeTab === 'ai' && (
+        <div className="p-3">
+          {aiLoading && <div className="py-8 text-center"><Spinner size={28} /><p className="text-slate-400 mt-3 text-sm">Generating assessment...</p></div>}
+          {!aiLoading && !aiResult && (
+            <div className="py-8 text-center">
+              <Bot size={24} className="text-slate-500 mx-auto mb-2" />
+              <p className="text-slate-400 text-sm mb-3">AI Analysis not yet run</p>
+              <button onClick={runAI} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors">
+                <Bot size={12} /> Run AI Analysis
+              </button>
+            </div>
+          )}
+          {!aiLoading && aiResult && (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <Badge value={aiResult.risk_level || 'REVIEW_REQUIRED'} />
+                <span className="text-xs text-slate-300">{aiResult.summary}</span>
+              </div>
+              {aiResult.reasoning && (
+                <div className="rounded bg-slate-900/40 border border-slate-700/40 p-2">
+                  <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Reasoning</div>
+                  <p className="text-xs text-slate-300 leading-relaxed">{aiResult.reasoning}</p>
+                </div>
+              )}
+              {aiResult.recommended_action && (
+                <div className="rounded bg-blue-900/10 border border-blue-800/30 p-2">
+                  <div className="text-xs font-semibold text-blue-400 uppercase tracking-wider mb-1">Recommended Action</div>
+                  <p className="text-xs text-slate-300">{aiResult.recommended_action}</p>
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -106,8 +186,15 @@ function MatchDetail({ matches }: { matches: any[] }) {
   )
 }
 
+// ── Expandable row detail (legacy — kept for no-match rows) ───────────────────
+function MatchDetail({ matches }: { matches: any[] }) {
+  if (!matches.length) return <span className="text-slate-600 text-xs">—</span>
+  return <span className="text-xs text-blue-400">{matches.length} match{matches.length !== 1 ? 'es' : ''}</span>
+}
+
 // ── Result row ────────────────────────────────────────────────────────────────
 function ResultRow({ r, index }: { r: any; index: number }) {
+  const [expanded, setExpanded] = useState(false)
   const topScore    = r.results?.[0]?.score ?? 0
   const matches     = r.results || []
   const sanctionHits = matches.filter((m: any) => m.list_category === 'SANCTIONS')
@@ -123,60 +210,58 @@ function ResultRow({ r, index }: { r: any; index: number }) {
     : <CheckCircle size={14} className="text-emerald-400" />
 
   return (
-    <tr className={index % 2 === 0 ? 'bg-slate-900/20' : ''}>
-      <td className="py-3 px-4">
-        <div className="flex items-center gap-2">
-          {statusIcon}
-          <span className="font-medium text-white text-sm">{r.name}</span>
-        </div>
-      </td>
-      <td className="py-3 px-4">
-        <Badge value={r.overallResult} />
-      </td>
-      <td className="py-3 px-4">
-        {topScore > 0 ? (
-          <div className="flex items-center gap-2 w-28">
-            <div className="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-              <div
-                className={`h-full rounded-full ${topScore >= 90 ? 'bg-red-500' : topScore >= 70 ? 'bg-amber-500' : 'bg-yellow-500'}`}
-                style={{ width: `${topScore}%` }}
-              />
-            </div>
-            <span className={`text-xs font-bold font-mono ${topScore >= 90 ? 'text-red-400' : topScore >= 70 ? 'text-amber-400' : 'text-yellow-400'}`}>
-              {topScore}%
-            </span>
+    <>
+      <tr className={index % 2 === 0 ? 'bg-slate-900/20' : ''}>
+        <td className="py-3 px-4">
+          <div className="flex items-center gap-2">
+            {statusIcon}
+            <span className="font-medium text-white text-sm">{r.name}</span>
           </div>
-        ) : <span className="text-slate-600 text-sm">—</span>}
-      </td>
-      <td className="py-3 px-4">
-        <div className="flex items-center gap-2 text-xs">
-          {sanctionHits.length > 0 && (
-            <span className="flex items-center gap-1 text-blue-400">
-              <Shield size={10} />{sanctionHits.length}
-            </span>
-          )}
-          {pepHits.length > 0 && (
-            <span className="flex items-center gap-1 text-purple-400">
-              <User size={10} />{pepHits.length}
-            </span>
-          )}
-          {matches.length === 0 && <span className="text-slate-600">—</span>}
-        </div>
-      </td>
-      <td className="py-3 px-4">
-        <div className="flex flex-wrap gap-1">
-          {hitSources.slice(0, 4).map((s: string) => <ListPill key={s} code={s} />)}
-          {hitSources.length > 4 && <span className="text-xs text-slate-500">+{hitSources.length - 4}</span>}
-          {hitSources.length === 0 && <span className="text-slate-600 text-xs">—</span>}
-        </div>
-      </td>
-      <td className="py-3 px-4">
-        <MatchDetail matches={matches} />
-      </td>
-      <td className="py-3 px-4 text-xs text-slate-500 font-mono">
-        {r.durationMs ? `${r.durationMs}ms` : '—'}
-      </td>
-    </tr>
+        </td>
+        <td className="py-3 px-4"><Badge value={r.overallResult} /></td>
+        <td className="py-3 px-4">
+          {topScore > 0 ? (
+            <div className="flex items-center gap-2 w-28">
+              <div className="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                <div className={`h-full rounded-full ${topScore >= 90 ? 'bg-red-500' : topScore >= 70 ? 'bg-amber-500' : 'bg-yellow-500'}`} style={{ width: `${topScore}%` }} />
+              </div>
+              <span className={`text-xs font-bold font-mono ${topScore >= 90 ? 'text-red-400' : topScore >= 70 ? 'text-amber-400' : 'text-yellow-400'}`}>{topScore}%</span>
+            </div>
+          ) : <span className="text-slate-600 text-sm">—</span>}
+        </td>
+        <td className="py-3 px-4">
+          <div className="flex items-center gap-2 text-xs">
+            {sanctionHits.length > 0 && <span className="flex items-center gap-1 text-blue-400"><Shield size={10} />{sanctionHits.length}</span>}
+            {pepHits.length > 0 && <span className="flex items-center gap-1 text-purple-400"><User size={10} />{pepHits.length}</span>}
+            {matches.length === 0 && <span className="text-slate-600">—</span>}
+          </div>
+        </td>
+        <td className="py-3 px-4">
+          <div className="flex flex-wrap gap-1">
+            {hitSources.slice(0, 4).map((s: string) => <ListPill key={s} code={s} />)}
+            {hitSources.length > 4 && <span className="text-xs text-slate-500">+{hitSources.length - 4}</span>}
+            {hitSources.length === 0 && <span className="text-slate-600 text-xs">—</span>}
+          </div>
+        </td>
+        <td className="py-3 px-4">
+          {matches.length > 0
+            ? <button onClick={() => setExpanded(v => !v)} className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors">
+                {matches.length} match{matches.length !== 1 ? 'es' : ''}
+                <ChevronRight size={10} className={`transition-transform ${expanded ? 'rotate-90' : ''}`} />
+              </button>
+            : <span className="text-slate-600 text-xs">—</span>
+          }
+        </td>
+        <td className="py-3 px-4 text-xs text-slate-500 font-mono">{r.durationMs ? `${r.durationMs}ms` : '—'}</td>
+      </tr>
+      {expanded && matches.length > 0 && (
+        <tr>
+          <td colSpan={7} className="px-4 pb-3 pt-1 bg-slate-900/30">
+            <SubjectMatchTabs subjectName={r.name} matches={matches} />
+          </td>
+        </tr>
+      )}
+    </>
   )
 }
 

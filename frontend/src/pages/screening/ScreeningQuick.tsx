@@ -300,13 +300,22 @@ export default function ScreeningQuick() {
     finally { setAiLoading(false) }
   }
 
-  const allMatches     = (result?.results || []) as any[]
-  const confirmedHits  = allMatches.filter((m: any) => m.score >= 90)
-  const reviewHits     = allMatches.filter((m: any) => m.score >= 70 && m.score < 90)
-  const hasResults     = result !== null
+  const [activeTab, setActiveTab] = useState<'sanctions' | 'pep' | 'ai'>('sanctions')
 
-  const displayConfirmed = allMatches.filter((m: any) => m.score >= 90)
-  const displayLower     = allMatches.filter((m: any) => m.score < 90)
+  const allMatches      = (result?.results || []) as any[]
+  const sanctionsHits   = allMatches.filter((m: any) => m.list_category === 'SANCTIONS')
+  const pepHits         = allMatches.filter((m: any) => m.list_category === 'PEP')
+  const confirmedHits   = allMatches.filter((m: any) => m.score >= 90)
+  const reviewHits      = allMatches.filter((m: any) => m.score >= 70 && m.score < 90)
+  const hasResults      = result !== null
+
+  // auto-switch to the tab that has results
+  useEffect(() => {
+    if (!hasResults) return
+    if (sanctionsHits.length > 0) setActiveTab('sanctions')
+    else if (pepHits.length > 0) setActiveTab('pep')
+    else setActiveTab('sanctions')
+  }, [result])  // eslint-disable-line
 
   return (
     <div className="space-y-0">
@@ -519,100 +528,147 @@ export default function ScreeningQuick() {
 
 
 
-              {/* ── Match list ── */}
+              {/* ── Tabs: Sanctions / PEP / AI Analysis ── */}
               <div className="rounded-xl border border-slate-700/60 bg-slate-800/20 overflow-hidden">
-                  <div className="px-4 py-3 border-b border-slate-700/60 flex items-center gap-2.5">
-                    <Activity size={14} className="text-blue-400" />
-                    <span className="text-sm font-semibold text-white">All Matches</span>
-                    <span className="ml-auto text-xs text-slate-500">
-                      {allMatches.length} result{allMatches.length !== 1 ? 's' : ''} · sorted by score
-                      {result?.dbFallback && <span className="ml-2 text-amber-400">(DB fallback)</span>}
-                    </span>
+
+                {/* Tab bar */}
+                <div className="flex border-b border-slate-700/60">
+                  {[
+                    { id: 'sanctions', label: 'Sanctions', count: sanctionsHits.length, icon: Shield, color: 'text-blue-400', activeColor: 'border-blue-500 text-blue-400' },
+                    { id: 'pep',       label: 'PEP',       count: pepHits.length,       icon: User,   color: 'text-purple-400', activeColor: 'border-purple-500 text-purple-400' },
+                    { id: 'ai',        label: 'AI Analysis', count: aiResult ? 1 : 0,  icon: Bot,    color: 'text-emerald-400', activeColor: 'border-emerald-500 text-emerald-400' },
+                  ].map(tab => (
+                    <button
+                      key={tab.id}
+                      onClick={() => setActiveTab(tab.id as any)}
+                      className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+                        activeTab === tab.id
+                          ? `${tab.activeColor} bg-slate-800/40`
+                          : 'border-transparent text-slate-500 hover:text-slate-300'
+                      }`}
+                    >
+                      <tab.icon size={13} />
+                      {tab.label}
+                      {tab.id !== 'ai' && (
+                        <span className={`text-xs px-1.5 py-0.5 rounded-full font-mono ${
+                          tab.count > 0
+                            ? tab.id === 'sanctions' ? 'bg-blue-500/20 text-blue-300' : 'bg-purple-500/20 text-purple-300'
+                            : 'bg-slate-700/60 text-slate-500'
+                        }`}>{tab.count}</span>
+                      )}
+                    </button>
+                  ))}
+                  <div className="ml-auto px-4 flex items-center text-xs text-slate-500">
+                    {allMatches.length} total · sorted by score
+                    {result?.dbFallback && <span className="ml-2 text-amber-400">(DB fallback)</span>}
+                    {result?.searchTier === 'mem' && <span className="ml-2 text-cyan-400">(Mem table)</span>}
                   </div>
-
-                  {allMatches.length === 0 ? (
-                    <div className="py-12 text-center">
-                      <CheckCircle size={28} className="text-emerald-500 mx-auto mb-2.5" />
-                      <p className="text-slate-300 font-medium">No matches found</p>
-                      <p className="text-slate-500 text-sm mt-1">Subject is not on any monitored list above the {form.threshold}% threshold</p>
-                      {result?.dbFallback && <p className="text-slate-600 text-xs mt-1">Searched via database fallback (RAM index not loaded)</p>}
-                    </div>
-                  ) : (
-                    <div className="px-4">
-                      {/* Confirmed high-confidence matches */}
-                      {displayConfirmed.length > 0 && (
-                        <>
-                          <div className="py-2 text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-2">
-                            <span className="w-2 h-2 rounded-full bg-red-500 inline-block"></span>
-                            Confirmed Matches — ≥90% ({displayConfirmed.length})
-                          </div>
-                          {displayConfirmed.map((m: any, i: number) => <UnifiedMatchRow key={i} m={m} index={i} />)}
-                        </>
-                      )}
-                      {/* Lower confidence matches */}
-                      {displayLower.length > 0 && (
-                        <LowerMatchesGroup matches={displayLower} threshold={form.threshold} />
-                      )}
-                    </div>
-                  )}
-              </div>
-
-              {/* ── AI Analysis ── */}
-              {hasResults && (
-                <div className="rounded-xl border border-slate-700/60 bg-slate-800/20 overflow-hidden">
-                  <div className="px-4 py-3 border-b border-slate-700/60 flex items-center gap-2.5">
-                    <Bot size={14} className="text-blue-400" />
-                    <span className="text-sm font-semibold text-white">AI Compliance Assessment</span>
-                    {aiResult && <Badge value={aiResult.risk_level || 'REVIEW_REQUIRED'} />}
-                  </div>
-
-                  {aiLoading && (
-                    <div className="py-16 text-center">
-                      <Spinner size={36} />
-                      <p className="text-slate-400 mt-4">Generating compliance assessment...</p>
-                    </div>
-                  )}
-
-                  {!aiLoading && !aiResult && (
-                    <div className="py-16 text-center px-6">
-                      <div className="p-3 rounded-full bg-slate-800/60 w-fit mx-auto mb-3">
-                        <Bot size={28} className="text-slate-500" />
-                      </div>
-                      <p className="text-slate-300 font-medium">AI Analysis not yet run</p>
-                      <p className="text-slate-500 text-sm mt-1 mb-4">
-                        Get an expert compliance assessment across all screening results
-                      </p>
-                      <button
-                        onClick={runAI}
-                        className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium transition-colors"
-                      >
-                        <Bot size={14} /> Run AI Analysis
-                      </button>
-                    </div>
-                  )}
-
-                  {!aiLoading && aiResult && (
-                    <div className="p-4 space-y-4">
-                      <div className="flex items-center gap-3">
-                        <Badge value={aiResult.risk_level || 'REVIEW_REQUIRED'} />
-                        <span className="text-sm text-slate-300">{aiResult.summary}</span>
-                      </div>
-                      {aiResult.reasoning && (
-                        <div className="rounded-lg bg-slate-900/40 border border-slate-700/40 p-3">
-                          <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Reasoning</div>
-                          <p className="text-sm text-slate-300 leading-relaxed">{aiResult.reasoning}</p>
-                        </div>
-                      )}
-                      {aiResult.recommended_action && (
-                        <div className="rounded-lg bg-blue-900/10 border border-blue-800/30 p-3">
-                          <div className="text-xs font-semibold text-blue-400 uppercase tracking-wider mb-1">Recommended Action</div>
-                          <p className="text-sm text-slate-300">{aiResult.recommended_action}</p>
-                        </div>
-                      )}
-                    </div>
-                  )}
                 </div>
-              )}
+
+                {/* ── Sanctions tab ── */}
+                {activeTab === 'sanctions' && (
+                  <div>
+                    {sanctionsHits.length === 0 ? (
+                      <div className="py-12 text-center">
+                        <CheckCircle size={28} className="text-emerald-500 mx-auto mb-2.5" />
+                        <p className="text-slate-300 font-medium">No sanctions matches found</p>
+                        <p className="text-slate-500 text-sm mt-1">Subject is not on any sanctions list above the {form.threshold}% threshold</p>
+                      </div>
+                    ) : (
+                      <div className="px-4">
+                        {sanctionsHits.filter((m:any) => m.score >= 90).length > 0 && (
+                          <>
+                            <div className="py-2 text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-2">
+                              <span className="w-2 h-2 rounded-full bg-red-500 inline-block"></span>
+                              Confirmed Matches — ≥90% ({sanctionsHits.filter((m:any) => m.score >= 90).length})
+                            </div>
+                            {sanctionsHits.filter((m:any) => m.score >= 90).map((m:any, i:number) => <UnifiedMatchRow key={i} m={m} index={i} />)}
+                          </>
+                        )}
+                        {sanctionsHits.filter((m:any) => m.score < 90).length > 0 && (
+                          <LowerMatchesGroup matches={sanctionsHits.filter((m:any) => m.score < 90)} threshold={form.threshold} />
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ── PEP tab ── */}
+                {activeTab === 'pep' && (
+                  <div>
+                    {pepHits.length === 0 ? (
+                      <div className="py-12 text-center">
+                        <CheckCircle size={28} className="text-emerald-500 mx-auto mb-2.5" />
+                        <p className="text-slate-300 font-medium">No PEP matches found</p>
+                        <p className="text-slate-500 text-sm mt-1">Subject is not in the PEP database above the {form.threshold}% threshold</p>
+                      </div>
+                    ) : (
+                      <div className="px-4">
+                        {pepHits.filter((m:any) => m.score >= 90).length > 0 && (
+                          <>
+                            <div className="py-2 text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-2">
+                              <span className="w-2 h-2 rounded-full bg-red-500 inline-block"></span>
+                              Confirmed PEP Matches — ≥90% ({pepHits.filter((m:any) => m.score >= 90).length})
+                            </div>
+                            {pepHits.filter((m:any) => m.score >= 90).map((m:any, i:number) => <UnifiedMatchRow key={i} m={m} index={i} />)}
+                          </>
+                        )}
+                        {pepHits.filter((m:any) => m.score < 90).length > 0 && (
+                          <LowerMatchesGroup matches={pepHits.filter((m:any) => m.score < 90)} threshold={form.threshold} />
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ── AI Analysis tab ── */}
+                {activeTab === 'ai' && (
+                  <div>
+                    {aiLoading && (
+                      <div className="py-16 text-center">
+                        <Spinner size={36} />
+                        <p className="text-slate-400 mt-4">Generating compliance assessment...</p>
+                      </div>
+                    )}
+                    {!aiLoading && !aiResult && (
+                      <div className="py-16 text-center px-6">
+                        <div className="p-3 rounded-full bg-slate-800/60 w-fit mx-auto mb-3">
+                          <Bot size={28} className="text-slate-500" />
+                        </div>
+                        <p className="text-slate-300 font-medium">AI Analysis not yet run</p>
+                        <p className="text-slate-500 text-sm mt-1 mb-4">Get an expert compliance assessment across all screening results</p>
+                        <button
+                          onClick={runAI}
+                          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium transition-colors"
+                        >
+                          <Bot size={14} /> Run AI Analysis
+                        </button>
+                      </div>
+                    )}
+                    {!aiLoading && aiResult && (
+                      <div className="p-4 space-y-4">
+                        <div className="flex items-center gap-3">
+                          <Badge value={aiResult.risk_level || 'REVIEW_REQUIRED'} />
+                          <span className="text-sm text-slate-300">{aiResult.summary}</span>
+                        </div>
+                        {aiResult.reasoning && (
+                          <div className="rounded-lg bg-slate-900/40 border border-slate-700/40 p-3">
+                            <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Reasoning</div>
+                            <p className="text-sm text-slate-300 leading-relaxed">{aiResult.reasoning}</p>
+                          </div>
+                        )}
+                        {aiResult.recommended_action && (
+                          <div className="rounded-lg bg-blue-900/10 border border-blue-800/30 p-3">
+                            <div className="text-xs font-semibold text-blue-400 uppercase tracking-wider mb-1">Recommended Action</div>
+                            <p className="text-sm text-slate-300">{aiResult.recommended_action}</p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+              </div>
             </>
           )}
         </div>
