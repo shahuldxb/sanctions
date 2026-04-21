@@ -86,16 +86,15 @@ function LiveClockCard() {
   )
 }
 
-function SourceCard({ src, st, isRunning, onRun, onStop, onToggleLogs, showingLogs, onClearMem, onLoadMem }: {
+function SourceCard({ src, st, isRunning, onRun, onStop, onClearMem, onLoadMem, onLoadRAM }: {
   src: typeof SOURCES[0]
   st: any
   isRunning: boolean
   onRun: () => void
   onStop: () => void
-  onToggleLogs: () => void
-  showingLogs: boolean
   onClearMem: () => void
   onLoadMem: () => void
+  onLoadRAM: () => void
 }) {
   const liveElapsed = useLiveTimer(isRunning ? (st.run_started_at || null) : null)
 
@@ -180,32 +179,32 @@ function SourceCard({ src, st, isRunning, onRun, onStop, onToggleLogs, showingLo
           </div>
         )}
 
-        {/* Action row: logs + clear buttons */}
-        <div className="mt-2 flex items-center justify-between gap-1">
+        {/* Action row: mem + RAM buttons */}
+        <div className="mt-2 border-t border-slate-700/50 pt-2 flex items-center gap-1 flex-wrap">
           <button
-            onClick={onToggleLogs}
-            className={`text-xs flex items-center gap-1 transition-colors ${showingLogs ? 'text-blue-400' : 'text-slate-500 hover:text-blue-400'}`}
+            onClick={onClearMem}
+            disabled={isRunning}
+            title="Clear In-Memory Table — delete rows from sanctions_entries_mem for this source"
+            className="flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded bg-red-900/20 text-red-400 hover:bg-red-900/40 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
-            <Terminal size={10} /> {showingLogs ? 'Hide Logs' : 'Show Logs'}
+            <Trash2 size={9} /> Clear Mem
           </button>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={onClearMem}
-              disabled={isRunning}
-              title="Clear In-Memory Table — delete rows from sanctions_entries_mem for this source"
-              className="flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded bg-red-900/20 text-red-400 hover:bg-red-900/40 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            >
-              <Trash2 size={9} /> Clear Mem
-            </button>
-            <button
-              onClick={onLoadMem}
-              disabled={isRunning}
-              title="Load In-Memory Table — copy rows from sanctions_entries into sanctions_entries_mem"
-              className="flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded bg-cyan-900/20 text-cyan-400 hover:bg-cyan-900/40 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            >
-              <MemoryStick size={9} /> Load Mem
-            </button>
-          </div>
+          <button
+            onClick={onLoadMem}
+            disabled={isRunning}
+            title="Load In-Memory Table — copy rows from sanctions_entries into sanctions_entries_mem"
+            className="flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded bg-cyan-900/20 text-cyan-400 hover:bg-cyan-900/40 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            <MemoryStick size={9} /> Load Mem
+          </button>
+          <button
+            onClick={onLoadRAM}
+            disabled={isRunning}
+            title="Load into RAM — reload this source into the Node.js unified RAM index"
+            className="flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded bg-violet-900/20 text-violet-400 hover:bg-violet-900/40 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            <MemoryStick size={9} /> Load RAM
+          </button>
         </div>
       </div>
     </div>
@@ -350,13 +349,42 @@ export default function ScraperControl() {
   }
 
   const loadMem = async (code: string) => {
+    setActiveSource(code)
+    const t0 = Date.now()
+    setLiveLog(p => [...p, `[${nowIST()}] [${code}] Loading into in-memory table (sanctions_entries_mem)...`])
     try {
       toast.loading(`Loading ${code} into in-memory table...`, { id: `load-mem-${code}` })
       const r = await api.post(`/scraper/load-mem/${code}`)
-      toast.success(`${code}: ${r.data?.loaded?.toLocaleString() || 0} rows loaded into in-memory table`, { id: `load-mem-${code}` })
+      const loaded = r.data?.loaded || 0
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1)
+      setLiveLog(p => [...p,
+        `[${nowIST()}] [${code}] ✓ In-memory table loaded: ${loaded.toLocaleString()} rows in ${elapsed}s`,
+      ])
+      toast.success(`${code}: ${loaded.toLocaleString()} rows loaded into in-memory table`, { id: `load-mem-${code}` })
       loadStatus()
     } catch (err: any) {
+      setLiveLog(p => [...p, `[${nowIST()}] [${code}] ✗ Load mem failed: ${err.message}`])
       toast.error(`Load mem failed: ${err.message}`, { id: `load-mem-${code}` })
+    }
+  }
+
+  const loadRAM = async (code: string) => {
+    setActiveSource(code)
+    const t0 = Date.now()
+    setLiveLog(p => [...p, `[${nowIST()}] [${code}] Loading into unified RAM index...`])
+    try {
+      toast.loading(`Loading ${code} into RAM...`, { id: `load-ram-${code}` })
+      await api.post('/unified/reload-category', { category: 'SANCTIONS' })
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1)
+      setLiveLog(p => [...p,
+        `[${nowIST()}] [${code}] ✓ RAM reload triggered for SANCTIONS category (${elapsed}s)`,
+        `[${nowIST()}] [${code}]   RAM index will update in background — check RAM Index count in a few seconds`,
+      ])
+      toast.success(`${code}: RAM reload triggered`, { id: `load-ram-${code}` })
+      setTimeout(loadStatus, 3000)
+    } catch (err: any) {
+      setLiveLog(p => [...p, `[${nowIST()}] [${code}] ✗ Load RAM failed: ${err.message}`])
+      toast.error(`Load RAM failed: ${err.message}`, { id: `load-ram-${code}` })
     }
   }
 
@@ -424,10 +452,9 @@ export default function ScraperControl() {
               isRunning={isRunning}
               onRun={() => runScraper(src.code)}
               onStop={() => stopScraper(src.code)}
-              onToggleLogs={() => setActiveSource(activeSource === src.code ? null : src.code)}
-              showingLogs={activeSource === src.code}
               onClearMem={() => clearMem(src.code)}
               onLoadMem={() => loadMem(src.code)}
+              onLoadRAM={() => loadRAM(src.code)}
             />
           )
         })}
