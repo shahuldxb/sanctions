@@ -24,6 +24,45 @@ const { query } = require('../db/connection');
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+/**
+ * Parse a single RFC-4180 CSV line into an array of fields.
+ * Handles quoted fields (including embedded commas and newlines).
+ * Does NOT use recursive regex — safe for very long lines.
+ */
+function parseCSVLine(line) {
+  const fields = [];
+  let i = 0;
+  while (i <= line.length) {
+    if (line[i] === '"') {
+      // Quoted field
+      let field = '';
+      i++; // skip opening quote
+      while (i < line.length) {
+        if (line[i] === '"' && line[i + 1] === '"') {
+          field += '"'; i += 2; // escaped quote
+        } else if (line[i] === '"') {
+          i++; break; // closing quote
+        } else {
+          field += line[i++];
+        }
+      }
+      fields.push(field);
+      if (line[i] === ',') i++; // skip comma after closing quote
+    } else {
+      // Unquoted field
+      const end = line.indexOf(',', i);
+      if (end === -1) {
+        fields.push(line.slice(i));
+        break;
+      } else {
+        fields.push(line.slice(i, end));
+        i = end + 1;
+      }
+    }
+  }
+  return fields;
+}
+
 function clean(v) {
   if (v === null || v === undefined) return null;
   const s = String(v).trim();
@@ -347,7 +386,7 @@ async function scrapeOFAC(sourceId, onProgress) {
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
-    const cols = line.match(/(".*?"|[^,]+)(?=,|$)/g) || line.split(',');
+    const cols = parseCSVLine(line);
     const row = {};
     headers.forEach((h, idx) => { row[h] = (cols[idx] || '').replace(/^"|"$/g, '').trim(); });
     const name = clean(row['name'] || row['caption'] || row['primary_name']);
@@ -390,7 +429,7 @@ async function scrapeEU(sourceId, onProgress) {
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line) continue;
-      const cols = line.match(/(".*?"|[^,]+)(?=,|$)/g) || line.split(',');
+      const cols = parseCSVLine(line);
       const row = {};
       headers.forEach((h, idx) => { row[h] = (cols[idx] || '').replace(/^"|"$/g, '').trim(); });
       const name = clean(row['name'] || row['caption']);
@@ -437,7 +476,7 @@ async function scrapeUN(sourceId, onProgress) {
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line) continue;
-      const cols = line.match(/(".*?"|[^,]+)(?=,|$)/g) || line.split(',');
+      const cols = parseCSVLine(line);
       const row = {};
       headers.forEach((h, idx) => { row[h] = (cols[idx] || '').replace(/^"|"$/g, '').trim(); });
       const name = clean(row['name'] || row['caption']);
@@ -484,7 +523,7 @@ async function scrapeUK(sourceId, onProgress) {
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line) continue;
-      const cols = line.match(/(".*?"|[^,]+)(?=,|$)/g) || line.split(',');
+      const cols = parseCSVLine(line);
       const row = {};
       headers.forEach((h, idx) => { row[h] = (cols[idx] || '').replace(/^"|"$/g, '').trim(); });
       const name = clean(row['name'] || row['caption']);
@@ -531,7 +570,7 @@ async function scrapeSECO(sourceId, onProgress) {
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line) continue;
-      const cols = line.match(/(".*?"|[^,]+)(?=,|$)/g) || line.split(',');
+      const cols = parseCSVLine(line);
       const row = {};
       headers.forEach((h, idx) => { row[h] = (cols[idx] || '').replace(/^"|"$/g, '').trim(); });
       const name = clean(row['name'] || row['caption']);
@@ -578,7 +617,7 @@ async function scrapeBIS(sourceId, onProgress) {
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line) continue;
-      const cols = line.match(/(".*?"|[^,]+)(?=,|$)/g) || line.split(',');
+      const cols = parseCSVLine(line);
       const row = {};
       headers.forEach((h, idx) => { row[h] = (cols[idx] || '').replace(/^"|"$/g, '').trim(); });
       const name = clean(row['name'] || row['caption']);
@@ -625,7 +664,7 @@ async function scrapeDFAT(sourceId, onProgress) {
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line) continue;
-      const cols = line.match(/(".*?"|[^,]+)(?=,|$)/g) || line.split(',');
+      const cols = parseCSVLine(line);
       const row = {};
       headers.forEach((h, idx) => { row[h] = (cols[idx] || '').replace(/^"|"$/g, '').trim(); });
       const name = clean(row['name'] || row['caption']);
@@ -672,7 +711,7 @@ async function scrapeMAS(sourceId, onProgress) {
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line) continue;
-      const cols = line.match(/(".*?"|[^,]+)(?=,|$)/g) || line.split(',');
+      const cols = parseCSVLine(line);
       const row = {};
       headers.forEach((h, idx) => { row[h] = (cols[idx] || '').replace(/^"|"$/g, '').trim(); });
       const name = clean(row['name'] || row['caption']);
