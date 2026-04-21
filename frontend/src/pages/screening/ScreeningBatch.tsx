@@ -194,7 +194,6 @@ function MatchDetail({ matches }: { matches: any[] }) {
 
 // ── Result row ────────────────────────────────────────────────────────────────
 function ResultRow({ r, index }: { r: any; index: number }) {
-  const [expanded, setExpanded] = useState(false)
   const topScore    = r.results?.[0]?.score ?? 0
   const matches     = r.results || []
   const sanctionHits = matches.filter((m: any) => m.list_category === 'SANCTIONS')
@@ -245,16 +244,13 @@ function ResultRow({ r, index }: { r: any; index: number }) {
         </td>
         <td className="py-3 px-4">
           {matches.length > 0
-            ? <button onClick={() => setExpanded(v => !v)} className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors">
-                {matches.length} match{matches.length !== 1 ? 'es' : ''}
-                <ChevronRight size={10} className={`transition-transform ${expanded ? 'rotate-90' : ''}`} />
-              </button>
+            ? <span className="text-xs text-blue-300">{matches.length} match{matches.length !== 1 ? 'es' : ''}</span>
             : <span className="text-slate-600 text-xs">—</span>
           }
         </td>
         <td className="py-3 px-4 text-xs text-slate-500 font-mono">{r.durationMs ? `${r.durationMs}ms` : '—'}</td>
       </tr>
-      {expanded && matches.length > 0 && (
+      {matches.length > 0 && (
         <tr>
           <td colSpan={7} className="px-4 pb-3 pt-1 bg-slate-900/30">
             <SubjectMatchTabs subjectName={r.name} matches={matches} />
