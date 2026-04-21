@@ -503,4 +503,75 @@ function upsertPEPInRAM(pepRow) {
   _entryCount = _pepEntries.size;
 }
 
-module.exports = { loadPEPs, screenPEP, getPEPStatus, reloadPEPs, upsertPEPInRAM };
+// ── Source-specific RAM reload ──────────────────────────────────────────────────
+const _sourceLoadProgress = {};
+
+async function loadSourceIntoRAM(source) {
+  console.log(`[PEPEngine] Reloading source '${source}' into RAM...`);
+  _sourceLoadProgress[source] = { loaded: 0, total: 0, pct: 0, isLoading: true };
+  try {
+    const { getPool } = require('../db/connection');
+    const pool = await getPool();
+    const safe = source.replace(/[^A-Z0-9_]/gi, '');
+
+    // Get count
+    const countRes = await pool.request().query(
+      `SELECT COUNT(*) AS cnt FROM pep_entries_mem WHERE status = 'ACTIVE' AND source = '${safe}'`
+    );
+    const total = countRes.recordset[0]?.cnt || 0;
+    _sourceLoadProgress[source].total = total;
+
+    // Remove old entries for this source from all indexes
+    const toRemove = [];
+    for (const [id, entry] of _pepEntries) {
+      if (entry.source === source) toRemove.push(id);
+    }
+    for (const id of toRemove) {
+      _pepEntries.delete(id);
+      // Remove from token index
+      for (const [tok, ids] of _tokenIndex) { ids.delete(id); if (ids.size === 0) _tokenIndex.delete(tok); }
+      for (const [code, ids] of _phoneticIndex) { ids.delete(id); if (ids.size === 0) _phoneticIndex.delete(code); }
+      for (const [gram, ids] of _trigramIndex) { ids.delete(id); if (ids.size === 0) _trigramIndex.delete(gram); }
+    }
+    console.log(`[PEPEngine] Removed ${toRemove.length} old '${source}' entries from RAM.`);
+
+    // Load fresh from DB
+    const PAGE = 5000;
+    let offset = 0;
+    let loaded = 0;
+    while (true) {
+      const res = await pool.request().query(`
+        SELECT id, external_id, source, schema_type,
+               primary_name, aliases, birth_date,
+               countries, nationality, position,
+               political_party, gender, dataset,
+               remarks, adverse_links, wikidata_id,
+               icij_node_id, first_seen, last_seen, status
+        FROM pep_entries_mem
+        WHERE status = 'ACTIVE' AND source = '${safe}'
+        ORDER BY id
+        OFFSET ${offset} ROWS FETCH NEXT ${PAGE} ROWS ONLY
+      `);
+      const page = res.recordset || [];
+      if (page.length === 0) break;
+      for (const row of page) upsertPEPInRAM(row);
+      loaded += page.length;
+      offset += PAGE;
+      _sourceLoadProgress[source].loaded = loaded;
+      _sourceLoadProgress[source].pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
+      if (page.length < PAGE) break;
+    }
+    _entryCount = _pepEntries.size;
+    _sourceLoadProgress[source] = { loaded, total, pct: 100, isLoading: false };
+    console.log(`[PEPEngine] Source '${source}' reloaded: ${loaded} entries. Total RAM: ${_entryCount}`);
+  } catch (err) {
+    _sourceLoadProgress[source] = { ..._sourceLoadProgress[source], isLoading: false, error: err.message };
+    throw err;
+  }
+}
+
+function getSourceLoadProgress(source) {
+  return _sourceLoadProgress[source] || { loaded: 0, total: 0, pct: 0, isLoading: false };
+}
+
+module.exports = { loadPEPs, screenPEP, getPEPStatus, reloadPEPs, upsertPEPInRAM, loadSourceIntoRAM, getSourceLoadProgress };

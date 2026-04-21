@@ -3,7 +3,7 @@
 const express = require('express');
 const router  = express.Router();
 const { query } = require('../db/connection');
-const { screenPEP, getPEPStatus, reloadPEPs } = require('../services/pepEngine');
+const { screenPEP, getPEPStatus, reloadPEPs, loadSourceIntoRAM } = require('../services/pepEngine');
 const { runFullPEPLoad, getPEPRunStatus } = require('../services/pepScraper');
 const { runBCPLoad, getBCPStatus, requestStop, requestPause, requestResume } = require('../services/pepBCPLoader');
 const { loadWikidata, getWikidataStatus } = require('../services/wikidataLoader');
@@ -236,6 +236,54 @@ router.post('/icij-load', (req, res) => {
 // ── GET /api/pep/icij-status ──────────────────────────────────────────────────
 router.get('/icij-status', (req, res) => {
   res.json(getICIJStatus());
+});
+
+// ── POST /api/pep/reload-source ── reload RAM for a specific source only ──────
+router.post('/reload-source', async (req, res) => {
+  const { source } = req.body;
+  const validSources = ['OPENSANCTIONS_PEP', 'WIKIDATA', 'ICIJ', 'ALL'];
+  if (!source || !validSources.includes(source)) {
+    return res.status(400).json({ error: `source must be one of: ${validSources.join(', ')}` });
+  }
+  try {
+    if (source === 'ALL') {
+      reloadPEPs().catch(e => console.error('[PEPEngine] Reload error:', e.message));
+      return res.json({ message: 'Full RAM reload started', source });
+    }
+    loadSourceIntoRAM(source).catch(e => console.error(`[PEPEngine] Source reload error (${source}):`, e.message));
+    res.json({ message: `RAM reload started for source: ${source}`, source });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/pep/source-stats/:source ── per-source detailed stats ────────────
+router.get('/source-stats/:source', async (req, res) => {
+  const { source } = req.params;
+  try {
+    const { getPool } = require('../db/connection');
+    const pool = await getPool();
+    const safe = source.replace(/[^A-Z0-9_]/gi, '');
+    const result = await pool.request().query(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN wikidata_id IS NOT NULL THEN 1 ELSE 0 END) as with_wikidata_id,
+        SUM(CASE WHEN adverse_links IS NOT NULL THEN 1 ELSE 0 END) as with_adverse_links,
+        SUM(CASE WHEN birth_date IS NOT NULL THEN 1 ELSE 0 END) as with_dob,
+        SUM(CASE WHEN position IS NOT NULL THEN 1 ELSE 0 END) as with_position,
+        SUM(CASE WHEN countries IS NOT NULL THEN 1 ELSE 0 END) as with_countries,
+        SUM(CASE WHEN dataset IS NOT NULL THEN 1 ELSE 0 END) as with_dataset,
+        COUNT(DISTINCT dataset) as dataset_count,
+        MIN(first_seen) as first_seen,
+        MAX(last_seen) as last_seen
+      FROM pep_entries
+      WHERE status = 'ACTIVE' AND source = '${safe}'
+    `);
+    const ramStatus = getPEPStatus();
+    res.json({ source, ...result.recordset[0], ramTotal: ramStatus.entryCount || 0 });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 module.exports = router;
